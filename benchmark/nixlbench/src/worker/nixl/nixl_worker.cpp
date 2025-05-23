@@ -667,9 +667,11 @@ static int execTransfer(nixlAgent *agent,
         } else if (XFERBENCH_BACKEND_POSIX == xferBenchConfig::backend) {
             target = "initiator";
         } else {
+#if 0
             params.notifMsg = "0xBEEF";
             params.hasNotif = true;
             target = "target";
+#endif
         }
 
         CHECK_NIXL_ERROR(agent->createXferReq(op, local_desc, remote_desc, target,
@@ -753,15 +755,8 @@ void xferBenchNixlWorker::poll(size_t block_size) {
     total_iter = skip + num_iter;
 
     /* Ensure warmup is done*/
-    while (skip != int(notifs["initiator"].size())) {
-        agent->getNotifs(notifs);
-    }
     synchronize();
 
-    /* Polling for actual iterations*/
-    while (total_iter != int(notifs["initiator"].size())) {
-        agent->getNotifs(notifs);
-    }
 }
 
 int xferBenchNixlWorker::synchronizeStart() {

@@ -147,6 +147,7 @@ static int processBatchSizes(xferBenchWorker &worker,
             xferBenchUtils::printStats(false, block_size, batch_size,
                                     std::get<double>(result));
         }
+       worker.synchronize();
     }
 
     return 0;

@@ -32,7 +32,7 @@
 #include <utils/serdes/serdes.h>
 #include <omp.h>
 
-#define USE_VMM 0
+#define USE_VMM 1
 #define ROUND_UP(value, granularity) ((((value) + (granularity) - 1) / (granularity)) * (granularity))
 
 static uintptr_t gds_running_ptr = 0x0;
@@ -221,10 +221,9 @@ std::optional<xferBenchIOV> xferBenchNixlWorker::initBasicDescDram(size_t buffer
 static std::optional<xferBenchIOV> getVramDesc(int devid, size_t buffer_size,
                                  bool isInit)
 {
-    void *addr;
-
     CHECK_CUDA_ERROR(cudaSetDevice(devid), "Failed to set device");
 #if !USE_VMM
+    void *addr;
     CHECK_CUDA_ERROR(cudaMalloc(&addr, buffer_size), "Failed to allocate CUDA buffer");
     if (isInit) {
         CHECK_CUDA_ERROR(cudaMemset(addr, XFERBENCH_INITIATOR_BUFFER_ELEMENT, buffer_size), "Failed to set device");
@@ -239,7 +238,7 @@ static std::optional<xferBenchIOV> getVramDesc(int devid, size_t buffer_size,
     CUmemAccessDesc access = {};
 
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-    // prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+    prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
     prop.allocFlags.gpuDirectRDMACapable = 1;
     prop.location.id = devid;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;

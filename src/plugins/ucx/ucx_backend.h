@@ -221,9 +221,12 @@ protected:
         return uws[worker_id];
     }
 
+    size_t
+    getWorkerId() const;
+
     virtual size_t
-    getWorkerId() const {
-        return std::hash<std::thread::id>{}(std::this_thread::get_id()) % uws.size();
+    getSharedWorkersSize() const {
+        return uws.size();
     }
 
     void
@@ -294,6 +297,7 @@ private:
     std::unique_ptr<nixlUcxContext> uc;
     std::vector<std::unique_ptr<nixlUcxWorker>> uws;
     std::string workerAddr;
+    mutable std::atomic<size_t> m_sharedWorkerIndex;
 
     /* CUDA data*/
     std::unique_ptr<nixlUcxCudaCtx> cudaCtx; // Context matching specific device
@@ -364,9 +368,8 @@ public:
     }
 
     size_t
-    getWorkerId() const override {
-        std::thread::id id = std::this_thread::get_id();
-        return (std::hash<std::thread::id>{}(id) % m_numSharedWorkers);
+    getSharedWorkersSize() const override {
+        return m_numSharedWorkers;
     }
 
     nixl_status_t

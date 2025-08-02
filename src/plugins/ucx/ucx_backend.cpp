@@ -984,7 +984,8 @@ nixlUcxEngine::create(const nixlBackendInitParams &init_params) {
 }
 
 nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params)
-    : nixlBackendEngine(&init_params) {
+    : nixlBackendEngine(&init_params),
+      m_sharedWorkerIndex(0) {
     size_t numWorkers;
     std::vector<std::string> devs; /* Empty vector */
     nixl_b_params_t *custom_params = init_params.customParams;
@@ -1049,9 +1050,16 @@ nixl_mem_list_t nixlUcxEngine::getSupportedMems () const {
     return mems;
 }
 
+static std::unordered_map<const nixlUcxEngine *, size_t> &
+tlsSharedWorkerMap() {
+    static thread_local std::unordered_map<const nixlUcxEngine *, size_t> map;
+    return map;
+}
+
 // Through parent destructor the unregister will be called.
 nixlUcxEngine::~nixlUcxEngine() {
     vramFiniCtx();
+    tlsSharedWorkerMap().erase(this);
 }
 
 /****************************************
@@ -1347,6 +1355,16 @@ static nixl_status_t _retHelper(nixl_status_t ret,  nixlUcxBackendH *hndl, nixlU
             return NIXL_ERR_BACKEND;
     }
     return NIXL_SUCCESS;
+}
+
+size_t
+nixlUcxEngine::getWorkerId() const {
+    auto it = tlsSharedWorkerMap().find(this);
+    if (it == tlsSharedWorkerMap().end()) {
+        size_t index = m_sharedWorkerIndex.fetch_add(1) % getSharedWorkersSize();
+        it = tlsSharedWorkerMap().emplace(this, index).first;
+    }
+    return it->second;
 }
 
 nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,

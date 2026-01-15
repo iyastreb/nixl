@@ -1175,6 +1175,8 @@ execTransferIterations(nixlAgent *agent,
                 agent->releaseXferReq(req);
                 return -1;
             }
+            agent->releaseXferReq(req);
+            agent->createXferReq(op, local_desc, remote_desc, target, req, &params);
             thread_stats.transfer_duration.add(timer.lap());
         }
 

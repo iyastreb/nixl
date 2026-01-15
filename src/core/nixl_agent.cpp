@@ -868,20 +868,20 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         return NIXL_ERR_NOT_FOUND;
     }
 
-    size_t total_bytes = 0;
-    // Check the correspondence between descriptor lists
-    if (local_descs.descCount() != remote_descs.descCount()) {
-        NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.descCount()
-                        << ", remote=" << remote_descs.descCount() << ")";
-        return NIXL_ERR_INVALID_PARAM;
-    }
-    for (int i = 0; i < local_descs.descCount(); ++i) {
-        if (local_descs[i].len != remote_descs[i].len) {
-            NIXL_ERROR_FUNC << "length mismatch at index " << i;
-            return NIXL_ERR_INVALID_PARAM;
-        }
-        total_bytes += local_descs[i].len;
-    }
+    // size_t total_bytes = 0;
+    // // Check the correspondence between descriptor lists
+    // if (local_descs.descCount() != remote_descs.descCount()) {
+    //     NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.descCount()
+    //                     << ", remote=" << remote_descs.descCount() << ")";
+    //     return NIXL_ERR_INVALID_PARAM;
+    // }
+    // for (int i = 0; i < local_descs.descCount(); ++i) {
+    //     if (local_descs[i].len != remote_descs[i].len) {
+    //         NIXL_ERROR_FUNC << "length mismatch at index " << i;
+    //         return NIXL_ERR_INVALID_PARAM;
+    //     }
+    //     total_bytes += local_descs[i].len;
+    // }
 
     if (!extra_params || extra_params->backends.size() == 0) {
         // Finding backends that support the corresponding memories
@@ -965,10 +965,10 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->notifMsg = opt_args.notifMsg;
     handle->hasNotif = opt_args.hasNotif;
 
-    if (data->telemetryEnabled) {
-        handle->telemetry.totalBytes = total_bytes;
-        handle->telemetry.descCount = handle->initiatorDescs->descCount();
-    }
+    // if (data->telemetryEnabled) {
+    //     handle->telemetry.totalBytes = total_bytes;
+    //     handle->telemetry.descCount = handle->initiatorDescs->descCount();
+    // }
 
     ret1 = handle->engine->prepXfer (handle->backendOp,
                                      *handle->initiatorDescs,

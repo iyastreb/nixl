@@ -852,8 +852,12 @@ nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params)
     uc = std::make_unique<nixlUcxContext>(
         devs, init_params.enableProgTh, num_workers, init_params.syncMode, engine_config);
 
+    size_t num_shared_workers = num_workers - num_threads;
     for (size_t i = 0; i < num_workers; i++) {
-        uws.emplace_back(std::make_unique<nixlUcxWorker>(*uc, err_handling_mode));
+        nixl_ucx_mt_t mt_type = (i < num_shared_workers) ?
+                                    uc->getMtType() :   /* Shared workers use default lock */
+                                    nixl_ucx_mt_t::CTX; /* Disable lock for dedicated workers */
+        uws.emplace_back(std::make_unique<nixlUcxWorker>(*uc, mt_type, err_handling_mode));
     }
 
     auto &uw = uws.front();
@@ -1464,8 +1468,8 @@ nixlUcxEngine::prepGpuSignal(const nixlBackendMD &meta,
 int nixlUcxEngine::progress() {
     // TODO: add listen for connection handling if necessary
     int ret = 0;
-    for (auto &uw: uws)
-        ret += uw->progress();
+    //for (auto &uw: uws)
+        ret += uws.front()->progress();
     return ret;
 }
 

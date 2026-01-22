@@ -875,6 +875,8 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                         << ", remote=" << remote_descs.descCount() << ")";
         return NIXL_ERR_INVALID_PARAM;
     }
+
+    uint64_t start_validation = nixlTime::getUs();
     for (int i = 0; i < local_descs.descCount(); ++i) {
         if (local_descs[i].len != remote_descs[i].len) {
             NIXL_ERROR_FUNC << "length mismatch at index " << i;
@@ -882,6 +884,8 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         }
         total_bytes += local_descs[i].len;
     }
+    uint64_t end_validation = nixlTime::getUs();
+    NIXL_WARN << "Validation time: " << end_validation - start_validation << " us";
 
     if (!extra_params || extra_params->backends.size() == 0) {
         // Finding backends that support the corresponding memories
@@ -914,11 +918,27 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     // TODO: merge descriptors back to back in memory (like makeXferReq).
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
+
+    uint64_t start_copy = nixlTime::getUs();
     std::unique_ptr<nixlXferReqH> handle = std::make_unique<nixlXferReqH>();
     handle->initiatorDescs = new nixl_meta_dlist_t(local_descs.getType());
-
     handle->targetDescs = new nixl_meta_dlist_t(remote_descs.getType());
+    handle->initiatorDescs->resize(local_descs.descCount());
+    handle->targetDescs->resize(remote_descs.descCount());
+    for (int i = 0; i < local_descs.descCount(); ++i) {
+        static_cast<nixlBasicDesc &>((*handle->initiatorDescs)[i]) = local_descs[i];
+        static_cast<nixlBasicDesc &>((*handle->targetDescs)[i]) = remote_descs[i];
+    }
+    uint64_t end_copy = nixlTime::getUs();
+    NIXL_WARN << "Copy time: " << end_copy - start_copy << " us";
 
+    delete handle->initiatorDescs;
+    delete handle->targetDescs;
+
+
+    uint64_t start_populate = nixlTime::getUs();
+    handle->initiatorDescs = new nixl_meta_dlist_t(local_descs.getType());
+    handle->targetDescs = new nixl_meta_dlist_t(remote_descs.getType());
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
     for (auto & backend : *backend_set) {
@@ -941,6 +961,8 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
         return NIXL_ERR_NOT_FOUND;
     }
+    uint64_t end_populate = nixlTime::getUs();
+    NIXL_WARN << "Populate time: " << end_populate - start_populate << " us";
 
     if (extra_params) {
         if (extra_params->hasNotif) {

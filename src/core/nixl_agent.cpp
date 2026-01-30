@@ -853,7 +853,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const std::string &remote_agent,
                          nixlXferReqH* &req_hndl,
                          const nixl_opt_args_t* extra_params) const {
-    nixl_status_t     ret1, ret2;
+    nixl_status_t     ret1;
     nixl_opt_b_args_t opt_args;
 
     std::unique_ptr<backend_set_t> backend_set = std::make_unique<backend_set_t>();
@@ -868,20 +868,20 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         return NIXL_ERR_NOT_FOUND;
     }
 
-    size_t total_bytes = 0;
+    // size_t total_bytes = 0;
     // Check the correspondence between descriptor lists
     if (local_descs.descCount() != remote_descs.descCount()) {
         NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.descCount()
                         << ", remote=" << remote_descs.descCount() << ")";
         return NIXL_ERR_INVALID_PARAM;
     }
-    for (int i = 0; i < local_descs.descCount(); ++i) {
-        if (local_descs[i].len != remote_descs[i].len) {
-            NIXL_ERROR_FUNC << "length mismatch at index " << i;
-            return NIXL_ERR_INVALID_PARAM;
-        }
-        total_bytes += local_descs[i].len;
-    }
+    // for (int i = 0; i < local_descs.descCount(); ++i) {
+    //     if (local_descs[i].len != remote_descs[i].len) {
+    //         NIXL_ERROR_FUNC << "length mismatch at index " << i;
+    //         return NIXL_ERR_INVALID_PARAM;
+    //     }
+    //     total_bytes += local_descs[i].len;
+    // }
 
     if (!extra_params || extra_params->backends.size() == 0) {
         // Finding backends that support the corresponding memories
@@ -915,25 +915,33 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
     std::unique_ptr<nixlXferReqH> handle = std::make_unique<nixlXferReqH>();
-    handle->initiatorDescs = new nixl_meta_dlist_t(local_descs.getType());
+    handle->initiatorDescsXfer = new nixlMetaDescList(local_descs);
+    handle->targetDescsXfer = new nixlMetaDescList(remote_descs);
+    handle->engine = *backend_set->begin();
 
-    handle->targetDescs = new nixl_meta_dlist_t(remote_descs.getType());
+    section_key_t sec_key = std::make_pair(local_descs.getType(), handle->engine);
+    auto it = data->memorySection->sectionMap.find(sec_key);
+    handle->localSection = it->second;
+
+    sec_key = std::make_pair(remote_descs.getType(), handle->engine);
+    it = data->remoteSections[remote_agent]->sectionMap.find(sec_key);
+    handle->remoteSection = it->second;
 
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
-    for (auto & backend : *backend_set) {
-        // If populate fails, it clears the resp before return
-        ret1 = data->memorySection->populate(
-                     local_descs, backend, *handle->initiatorDescs);
-        ret2 = data->remoteSections[remote_agent]->populate(
-                     remote_descs, backend, *handle->targetDescs);
+    // for (auto & backend : *backend_set) {
+    //     // If populate fails, it clears the resp before return
+    //     ret1 = data->memorySection->populate(
+    //                  local_descs, backend, *handle->initiatorDescs);
+    //     ret2 = data->remoteSections[remote_agent]->populate(
+    //                  remote_descs, backend, *handle->targetDescs);
 
-        if ((ret1 == NIXL_SUCCESS) && (ret2 == NIXL_SUCCESS)) {
-            NIXL_INFO << "Selected backend: " << backend->getType();
-            handle->engine = backend;
-            break;
-        }
-    }
+    //     if ((ret1 == NIXL_SUCCESS) && (ret2 == NIXL_SUCCESS)) {
+    //         NIXL_INFO << "Selected backend: " << backend->getType();
+    //         handle->engine = backend;
+    //         break;
+    //     }
+    // }
 
     if (!handle->engine) {
         NIXL_ERROR_FUNC << "no specified or potential backend had the required "
@@ -964,11 +972,12 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->status = NIXL_ERR_NOT_POSTED;
     handle->notifMsg = opt_args.notifMsg;
     handle->hasNotif = opt_args.hasNotif;
+    opt_args.req = handle.get();
 
-    if (data->telemetryEnabled) {
-        handle->telemetry.totalBytes = total_bytes;
-        handle->telemetry.descCount = handle->initiatorDescs->descCount();
-    }
+    // if (data->telemetryEnabled) {
+    //     handle->telemetry.totalBytes = total_bytes;
+    //     handle->telemetry.descCount = handle->initiatorDescs->descCount();
+    // }
 
     ret1 = handle->engine->prepXfer (handle->backendOp,
                                      *handle->initiatorDescs,
@@ -1098,6 +1107,7 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         return NIXL_ERR_BACKEND;
     }
 
+    opt_args.req = req_hndl;
     // If status is not NIXL_IN_PROG we can repost,
     req_hndl->status = req_hndl->engine->postXfer(req_hndl->backendOp,
                                                   *req_hndl->initiatorDescs,

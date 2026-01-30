@@ -1171,6 +1171,8 @@ execTransferIterations(nixlAgent *agent,
         // Standard path: Single request for all iterations
         for (int i = 0; i < num_iter; ++i) {
             nixl_status_t rc = execSingleTransfer(agent, req, timer, thread_stats);
+            agent->releaseXferReq(req);
+            agent->createXferReq(op, local_desc, remote_desc, target, req, &params);
 
             if (__builtin_expect(rc != NIXL_SUCCESS, 0)) {
                 std::cout << "NIXL Xfer failed with status: " << nixlEnumStrings::statusStr(rc)

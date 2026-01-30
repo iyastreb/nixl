@@ -250,8 +250,7 @@ protected:
 
     virtual nixl_status_t
     sendXferRange(const nixl_xfer_op_t &operation,
-                  const nixl_meta_dlist_t &local,
-                  const nixl_meta_dlist_t &remote,
+                  nixlXferReqH &req,
                   const std::string &remote_agent,
                   nixlBackendReqH *handle,
                   size_t start_idx,
@@ -291,8 +290,7 @@ private:
     static batchResult
     sendXferRangeBatch(nixlUcxEp &ep,
                        nixl_xfer_op_t operation,
-                       const nixl_meta_dlist_t &local,
-                       const nixl_meta_dlist_t &remote,
+                       nixlXferReqH &req,
                        size_t worker_id,
                        size_t start_idx,
                        size_t end_idx);
@@ -376,8 +374,7 @@ protected:
 
     nixl_status_t
     sendXferRange(const nixl_xfer_op_t &operation,
-                  const nixl_meta_dlist_t &local,
-                  const nixl_meta_dlist_t &remote,
+                  nixlXferReqH &req,
                   const std::string &remote_agent,
                   nixlBackendReqH *handle,
                   size_t start_idx,

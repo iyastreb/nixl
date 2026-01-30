@@ -20,6 +20,7 @@
 #include "serdes/serdes.h"
 #include "common/nixl_log.h"
 #include "gpu_xfer_req_h.h"
+#include "transfer_request.h"
 
 #include <optional>
 #include <limits>
@@ -704,7 +705,8 @@ nixlUcxThreadPoolEngine::prepXfer(const nixl_xfer_op_t &operation,
                                   const std::string &remote_agent,
                                   nixlBackendReqH *&handle,
                                   const nixl_opt_b_args_t *opt_args) const {
-    size_t batch_size = local.descCount();
+    nixlXferReqH* owner = opt_args->req;
+    size_t batch_size = owner->initiatorDescsXfer->descCount();
     if (batch_size < splitBatchSize_) {
         return nixlUcxEngine::prepXfer(operation, local, remote, remote_agent, handle, opt_args);
     }
@@ -722,8 +724,7 @@ nixlUcxThreadPoolEngine::prepXfer(const nixl_xfer_op_t &operation,
 
 nixl_status_t
 nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
-                                       const nixl_meta_dlist_t &local,
-                                       const nixl_meta_dlist_t &remote,
+                                       nixlXferReqH &req,
                                        const std::string &remote_agent,
                                        nixlBackendReqH *handle,
                                        size_t start_idx,
@@ -731,7 +732,7 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
     nixlUcxBackendH *int_handle = static_cast<nixlUcxBackendH *>(handle);
     if (!int_handle->isComposite()) {
         return nixlUcxEngine::sendXferRange(
-            operation, local, remote, remote_agent, handle, start_idx, end_idx);
+            operation, req, remote_agent, handle, start_idx, end_idx);
     }
 
     nixlUcxCompositeBackendH *comp_handle = static_cast<nixlUcxCompositeBackendH *>(int_handle);
@@ -754,9 +755,9 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
             NIXL_TRACE << "dedicated " << *thread << " starting " << *chunk_handle;
 
             size_t start_idx = i * chunk_size;
-            size_t end_idx = std::min(start_idx + chunk_size, (size_t)local.descCount());
+            size_t end_idx = std::min(start_idx + chunk_size, (size_t)req.targetDescsXfer->descCount());
             nixl_status_t ret = nixlUcxEngine::sendXferRange(
-                operation, local, remote, remote_agent, chunk_handle, start_idx, end_idx);
+                operation, req, remote_agent, chunk_handle, start_idx, end_idx);
             if (ret != NIXL_SUCCESS) {
                 status.store(ret);
                 chunk_handle->complete(ret);
@@ -1103,10 +1104,10 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
                                        nixlBackendReqH* &handle,
                                        const nixl_opt_b_args_t* opt_args) const
 {
-    if (local.descCount() == 0 || remote.descCount() == 0) {
-        NIXL_ERROR << "Local or remote descriptor list is empty";
-        return NIXL_ERR_INVALID_PARAM;
-    }
+    // if (local.descCount() == 0 || remote.descCount() == 0) {
+    //     NIXL_ERROR << "Local or remote descriptor list is empty";
+    //     return NIXL_ERR_INVALID_PARAM;
+    // }
 
     const auto worker_id = getWorkerId(opt_args);
     /* TODO: try to get from a pool first */
@@ -1176,21 +1177,40 @@ nixl_status_t nixlUcxEngine::estimateXferCost (const nixl_xfer_op_t &operation,
 nixlUcxEngine::batchResult
 nixlUcxEngine::sendXferRangeBatch(nixlUcxEp &ep,
                                   nixl_xfer_op_t operation,
-                                  const nixl_meta_dlist_t &local,
-                                  const nixl_meta_dlist_t &remote,
+                                  nixlXferReqH &req,
                                   size_t worker_id,
                                   size_t start_idx,
                                   size_t end_idx) {
     batchResult result = {NIXL_SUCCESS, 0, nullptr};
 
+    nixlMetaDescList &local = *req.initiatorDescsXfer;
+    nixlMetaDescList &remote = *req.targetDescsXfer;
+
+    const nixlBasicDesc *lmdesc = &local[start_idx];
+    int lindex = req.localSection->getCoveringIndex(*lmdesc);
+    auto *lmd = static_cast<nixlUcxPrivateMetadata *>((*req.localSection)[lindex].metadataP);
+    const nixlBasicDesc *rmdesc = &remote[start_idx];
+    int rindex = req.remoteSection->getCoveringIndex(*rmdesc);
+    auto *rmd = static_cast<nixlUcxPublicMetadata *>((*req.remoteSection)[rindex].metadataP);
     for (size_t i = start_idx; i < end_idx; ++i) {
+        if (!lmdesc->covers(local[i])) {
+            lmdesc = &local[i];
+            lindex = req.localSection->getCoveringIndex(*lmdesc);
+            lmd = static_cast<nixlUcxPrivateMetadata *>((*req.localSection)[lindex].metadataP);
+        }
+        if (!rmdesc->covers(remote[i])) {
+            rmdesc = &remote[i];
+            rindex = req.remoteSection->getCoveringIndex(*rmdesc);
+            rmd = static_cast<nixlUcxPublicMetadata *>((*req.remoteSection)[rindex].metadataP);
+        }
+
         void *laddr = (void *)local[i].addr;
         size_t lsize = local[i].len;
         uint64_t raddr = static_cast<uint64_t>(remote[i].addr);
         NIXL_ASSERT(lsize == remote[i].len);
 
-        auto lmd = static_cast<nixlUcxPrivateMetadata *>(local[i].metadataP);
-        auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[i].metadataP);
+        // auto lmd = static_cast<nixlUcxPrivateMetadata *>(local[i].metadataP);
+        // auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[i].metadataP);
         auto &rmd_ep = rmd->conn->getEp(worker_id);
         if (__builtin_expect(rmd_ep.get() != &ep, 0)) {
             break;
@@ -1225,8 +1245,7 @@ nixlUcxEngine::sendXferRangeBatch(nixlUcxEp &ep,
 
 nixl_status_t
 nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
-                             const nixl_meta_dlist_t &local,
-                             const nixl_meta_dlist_t &remote,
+                             nixlXferReqH &req,
                              const std::string &remote_agent,
                              nixlBackendReqH *handle,
                              size_t start_idx,
@@ -1243,11 +1262,20 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
      * one flush request, and one notification request */
     intHandle->reserve(3);
 
+    const nixlBasicDesc *rmdesc = &(*req.targetDescsXfer)[start_idx];
+    int rindex = req.remoteSection->getCoveringIndex(*rmdesc);
+    auto *rmd = static_cast<nixlUcxPublicMetadata *>((*req.remoteSection)[rindex].metadataP);
+    req.targetDescsXfer->metadata(0) = rmd;
     for (size_t i = start_idx; i < end_idx;) {
         /* Send requests to a single EP */
-        auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[i].metadataP);
+        if (!rmdesc->covers((*req.targetDescsXfer)[i])) {
+            rmdesc = &(*req.targetDescsXfer)[i];
+            rindex = req.remoteSection->getCoveringIndex(*rmdesc);
+            rmd = static_cast<nixlUcxPublicMetadata *>((*req.remoteSection)[rindex].metadataP);
+        }
+
         auto &ep = rmd->conn->getEp(workerId);
-        auto result = sendXferRangeBatch(*ep, operation, local, remote, workerId, i, end_idx);
+        auto result = sendXferRangeBatch(*ep, operation, req, workerId, i, end_idx);
 
         /* Append a single pending request for the entire EP batch */
         ret = intHandle->append(result.status, result.req, rmd->conn);
@@ -1277,11 +1305,14 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
 nixl_status_t
 nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
-                        const nixl_meta_dlist_t &local,
-                        const nixl_meta_dlist_t &remote,
+                        const nixl_meta_dlist_t &local_,
+                        const nixl_meta_dlist_t &remote_,
                         const std::string &remote_agent,
                         nixlBackendReqH *&handle,
                         const nixl_opt_b_args_t *opt_args) const {
+    nixlXferReqH* req = opt_args->req;
+    nixlMetaDescList &local = *req->initiatorDescsXfer;
+    nixlMetaDescList &remote = *req->targetDescsXfer;
     size_t lcnt = local.descCount();
     size_t rcnt = remote.descCount();
     nixlUcxBackendH *int_handle = static_cast<nixlUcxBackendH *>(handle);
@@ -1295,7 +1326,7 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
 
     // TODO: assert that handle is empty/completed, as we can't post request before completion
 
-    ret = sendXferRange(operation, local, remote, remote_agent, handle, 0, lcnt);
+    ret = sendXferRange(operation, *req, remote_agent, handle, 0, lcnt);
     if (ret != NIXL_SUCCESS) {
         return ret;
     }
@@ -1304,7 +1335,7 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
     if (opt_args && opt_args->hasNotif) {
         if (ret == NIXL_SUCCESS) {
             nixlUcxReq req;
-            auto rmd = (nixlUcxPublicMetadata *)remote[0].metadataP;
+            auto rmd = (nixlUcxPublicMetadata *)remote.metadata(0);
             ret = notifSendPriv(remote_agent,
                                 opt_args->notifMsg,
                                 rmd->conn->getEp(int_handle->getWorkerId()),

@@ -92,7 +92,7 @@ using nixl_sec_dlist_t = nixlSecDescList;
 using section_map_t = std::map<section_key_t, nixl_sec_dlist_t*>;
 
 class nixlMemSection {
-    protected:
+    public:
         std::array<backend_set_t, FILE_SEG+1>         memToBackend;
         section_map_t                                 sectionMap;
 

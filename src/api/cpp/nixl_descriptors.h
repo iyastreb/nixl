@@ -427,6 +427,27 @@ public:
     std::string
     to_string(bool compact = false) const;
 };
+
+template<class T>
+class nixlPropertyDescList {
+public:
+    nixlPropertyDescList(const nixlDescList<nixlBasicDesc> &descs) : descs(descs) {
+        properties.resize(1);
+    }
+
+    size_t descCount() const {
+        return descs.descCount();
+    }
+
+    const nixlBasicDesc& operator[](int index) const {
+        return descs[index];
+    }
+
+protected:
+    std::vector<T> properties;
+    const nixlDescList<nixlBasicDesc> &descs;
+};
+
 /**
  * @brief A typedef for a nixlDescList<nixlBasicDesc>
  *        used for creating transfer descriptor lists

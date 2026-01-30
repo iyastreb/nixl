@@ -34,12 +34,16 @@ enum nixl_telemetry_stat_status_t {
 // Contains pointers to corresponding backend engine and its handler, and populated
 // and verified DescLists, and other state and metadata needed for a NIXL transfer
 class nixlXferReqH {
-    private:
+    public:
         nixlBackendEngine* engine         = nullptr;
         nixlBackendReqH*   backendHandle  = nullptr;
 
         nixl_meta_dlist_t* initiatorDescs = nullptr;
         nixl_meta_dlist_t* targetDescs    = nullptr;
+        nixlMetaDescList* initiatorDescsXfer = nullptr;
+        nixlMetaDescList* targetDescsXfer    = nullptr;
+        nixl_sec_dlist_t* localSection = nullptr;
+        nixl_sec_dlist_t* remoteSection = nullptr;
 
         std::string        remoteAgent;
         nixl_blob_t        notifMsg;
@@ -55,8 +59,14 @@ class nixlXferReqH {
 
         inline ~nixlXferReqH() {
             // delete checks for nullptr itself
-            delete initiatorDescs;
-            delete targetDescs;
+            if (initiatorDescs != nullptr)
+                delete initiatorDescs;
+            if (targetDescs != nullptr)
+                delete targetDescs;
+            if (initiatorDescsXfer != nullptr)
+                delete initiatorDescsXfer;
+            if (targetDescsXfer != nullptr)
+                delete targetDescsXfer;
             if (backendHandle != nullptr)
                 engine->releaseReqH(backendHandle);
         }

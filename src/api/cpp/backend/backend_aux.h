@@ -33,6 +33,7 @@ struct nixlBackendOptionalArgs {
     nixl_blob_t notifMsg;
     bool        hasNotif = false;
     nixl_blob_t customParam;
+    nixlXferReqH *req = nullptr;
 };
 
 using nixl_opt_b_args_t = nixlBackendOptionalArgs;
@@ -133,5 +134,16 @@ operator==(const nixlRemoteMetaDesc &lhs, const nixlRemoteMetaDesc &rhs) {
 
 typedef nixlDescList<nixlMetaDesc> nixl_meta_dlist_t;
 using nixl_remote_meta_dlist_t = nixlDescList<nixlRemoteMetaDesc>;
+
+class nixlMetaDescList : public nixlPropertyDescList<nixlBackendMD*> {
+public:
+    using nixlPropertyDescList<nixlBackendMD*>::nixlPropertyDescList;
+
+    nixlBackendMD *& metadata(int index) {
+        return properties[index];
+    }
+
+private:
+};
 
 #endif

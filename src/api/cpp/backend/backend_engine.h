@@ -29,6 +29,19 @@
 
 constexpr size_t MAX_TELEMETRY_QUEUE_SIZE = 1000;
 
+/**
+ * Capabilities of a backend
+ *
+ * This enum is used to represent the capabilities of a backend.
+ * It is used to determine which features are supported by the backend.
+ */
+enum nixl_backend_capability_t : uint64_t {
+    /* No capabilities */
+    NIXL_BACKEND_CAP_NONE           = 0,
+    /* Backend can validate the descriptor list */
+    NIXL_BACKEND_CAP_VALIDATE_DESC  = 1 << 0,
+};
+
 // Base backend engine class for different backend implementations
 class nixlBackendEngine {
     private:
@@ -37,6 +50,7 @@ class nixlBackendEngine {
         nixl_b_params_t customParams;
         std::vector<nixlTelemetryEvent> telemetryEvents_;
         std::mutex telemetryEventsMutex_;
+        nixl_backend_capability_t capabilities_;
 
     protected:
         // Members that can be accessed by the child (localAgent cannot be modified)
@@ -75,9 +89,11 @@ class nixlBackendEngine {
         }
 
     public:
-        explicit nixlBackendEngine(const nixlBackendInitParams *init_params)
+        explicit nixlBackendEngine(const nixlBackendInitParams *init_params,
+                                   nixl_backend_capability_t capabilities = NIXL_BACKEND_CAP_NONE)
             : backendType(init_params->type),
               customParams(*init_params->customParams),
+              capabilities_(capabilities),
               localAgent(init_params->localAgent),
               enableTelemetry_(init_params->enableTelemetry_) {}
 
@@ -98,6 +114,11 @@ class nixlBackendEngine {
         bool getInitErr() const noexcept { return initErr; }
         const nixl_backend_t& getType() const noexcept { return backendType; }
         const nixl_b_params_t& getCustomParams() const noexcept { return customParams; }
+
+        bool
+        supportsCapability(nixl_backend_capability_t capability) const noexcept {
+            return (capabilities_ & capability) != 0;
+        }
 
         // The support function determine which methods are necessary by the child backend, and
         // if they're called by mistake, they will return error if not implemented by backend.

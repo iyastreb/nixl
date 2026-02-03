@@ -819,7 +819,7 @@ nixlUcxEngine::create(const nixlBackendInitParams &init_params) {
 }
 
 nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params)
-    : nixlBackendEngine(&init_params),
+    : nixlBackendEngine(&init_params, NIXL_BACKEND_CAP_VALIDATE_DESC),
       sharedWorkerIndex_(1),
       progressThreadEnabled_(init_params.enableProgTh) {
     std::vector<std::string> devs; /* Empty vector */
@@ -1187,7 +1187,10 @@ nixlUcxEngine::sendXferRangeBatch(nixlUcxEp &ep,
         void *laddr = (void *)local[i].addr;
         size_t lsize = local[i].len;
         uint64_t raddr = static_cast<uint64_t>(remote[i].addr);
-        NIXL_ASSERT(lsize == remote[i].len);
+        if (__builtin_expect(lsize != remote[i].len, 0)) {
+            result.status = NIXL_ERR_INVALID_PARAM;
+            goto err;
+        }
 
         auto lmd = static_cast<nixlUcxPrivateMetadata *>(local[i].metadataP);
         auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[i].metadataP);
@@ -1209,16 +1212,19 @@ nixlUcxEngine::sendXferRangeBatch(nixlUcxEp &ep,
             result.req = req;
         } else if (ret != NIXL_SUCCESS) {
             result.status = ret;
-            if (result.req != nullptr) {
-                ucp_request_free(result.req);
-                result.req = nullptr;
-            }
-            break;
+            goto err;
         }
     }
 
     if (result.status == NIXL_SUCCESS && result.req) {
         result.status = NIXL_IN_PROG;
+    }
+    return result;
+
+err:
+    if (result.req != nullptr) {
+        ucp_request_free(result.req);
+        result.req = nullptr;
     }
     return result;
 }

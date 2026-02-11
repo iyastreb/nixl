@@ -1225,7 +1225,7 @@ prepareTransferDescriptors(nixl_xfer_dlist_t &local_desc,
 static int
 execTransferIterations(nixlAgent *agent,
                        const nixl_xfer_op_t op,
-                       nixl_xfer_dlist_t &local_desc,
+                       nixl_xfer_dlist_t &local_desc_,
                        nixl_xfer_dlist_t &remote_desc,
                        const std::string &target,
                        nixl_opt_args_t &params,

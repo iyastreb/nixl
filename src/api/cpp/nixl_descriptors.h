@@ -256,8 +256,32 @@ protected:
     nixl_mem_t type;
     /** @var Vector for storing nixlDescs */
     std::vector<T> descs;
+    /** @var Whether the descriptor list is a shallow copy */
+    bool isShallowCopy_;
+    /** @var Common view of the descriptor list */
+    const T* __restrict view_;
+    /** @var Size of the descriptor list */
+    size_t size_;
 
+    inline void
+    syncView() {
+        view_ = descs.data();
+        size_ = descs.size();
+    }
+
+    static void
+    swap(nixlDescList<T>& first, nixlDescList<T>& second) noexcept {
+        std::swap(first.type, second.type);
+        std::swap(first.descs, second.descs);
+        std::swap(first.isShallowCopy_, second.isShallowCopy_);
+        std::swap(first.view_, second.view_);
+        std::swap(first.size_, second.size_);
+    }
+
+    nixlDescList(const nixl_mem_t &type, const T* view, size_t size);
 public:
+    using const_iterator = const T*;
+
     /**
      * @brief Parametrized Constructor for nixlDescList
      *
@@ -280,7 +304,15 @@ public:
      *
      * @param d_list other nixlDescList object of the same type
      */
-    nixlDescList(const nixlDescList<T> &d_list) = default;
+    nixlDescList(const nixlDescList<T> &d_list);
+
+    /**
+     * @brief Move constructor for creating nixlDescList from another object
+     *        of the same type.
+     *
+     * @param d_list other nixlDescList object of the same type
+     */
+    nixlDescList(nixlDescList<T> &&d_list) noexcept;
 
     /**
      * @brief Operator = overloading constructor for nixlDescList
@@ -288,7 +320,13 @@ public:
      * @param d_list nixlDescList object
      */
     nixlDescList &
-    operator=(const nixlDescList<T> &d_list) = default;
+    operator=(nixlDescList<T> d_list) noexcept;
+
+    /* TODO */
+    static const nixlDescList<T>
+    makeShallowCopy(const nixl_mem_t &type, const T* view, size_t size) {
+        return nixlDescList<T>(type, view, size);
+    }
 
     /**
      * @brief nixlDescList Destructor
@@ -308,7 +346,7 @@ public:
      */
     inline int
     descCount() const {
-        return descs.size();
+        return size_;
     }
 
     /**
@@ -316,29 +354,30 @@ public:
      */
     inline bool
     isEmpty() const {
-        return (descs.size() == 0);
+        return (size_ == 0);
     }
 
-    /**
-     * @brief Operator [] overloading, get/set descriptor at [index].
-     *        Can throw std::out_of_range exception.
-     */
-    const T &
-    operator[](unsigned int index) const;
-    virtual T &
-    operator[](unsigned int index);
+    inline const T &
+    operator[](unsigned int index) const {
+        return view_[index];
+    }
+
+    inline T &
+    operator[](unsigned int index) {
+        return descs[index];
+    }
 
     /**
      * @brief Vector like iterators for const and non-const elements
      */
-    inline typename std::vector<T>::const_iterator
+    inline const_iterator
     begin() const {
-        return descs.begin();
+        return view_;
     }
 
-    inline typename std::vector<T>::const_iterator
+    inline const_iterator
     end() const {
-        return descs.end();
+        return view_ + size_;
     }
 
     inline typename std::vector<T>::iterator
@@ -376,6 +415,7 @@ public:
     inline void
     clear() {
         descs.clear();
+        syncView();
     }
 
     /**

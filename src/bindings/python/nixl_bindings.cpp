@@ -231,6 +231,10 @@ PYBIND11_MODULE(_bindings, m) {
                      throw std::invalid_argument("descs must be a C-contiguous numpy array");
                  }
                  size_t n = descs.shape(0);
+                 if (n > 128) {
+                    return nixl_xfer_dlist_t::makeShallowCopy(
+                        mem, reinterpret_cast<const nixlBasicDesc*>(descs.data()), n);
+                 }
                  nixl_xfer_dlist_t new_list(mem, n);
                  // We assume that the Nx3 array matches the nixlBasicDesc layout so we can simply
                  // memcpy

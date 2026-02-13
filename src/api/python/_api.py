@@ -15,7 +15,6 @@
 
 import pickle
 from typing import Optional, Union
-from enum import IntFlag
 
 import numpy as np
 import torch
@@ -933,7 +932,9 @@ class nixl_agent:
             new_descs = None
         elif isinstance(descs[0], tuple):
             if mem_type is not None and len(descs[0]) == 3:
-                new_descs = nixlBind.nixlXferDList(self.nixl_mems[mem_type], descs, zero_copy)
+                new_descs = nixlBind.nixlXferDList(
+                    self.nixl_mems[mem_type], descs, zero_copy
+                )
             elif mem_type is None:
                 logger.error("Please specify a mem type if not using Tensors")
                 new_descs = None
@@ -942,7 +943,9 @@ class nixl_agent:
                 new_descs = None
         elif isinstance(descs, np.ndarray):
             if mem_type is not None and descs.ndim == 2 and descs.shape[1] == 3:
-                new_descs = nixlBind.nixlXferDList(self.nixl_mems[mem_type], descs, zero_copy)
+                new_descs = nixlBind.nixlXferDList(
+                    self.nixl_mems[mem_type], descs, zero_copy
+                )
             elif mem_type is None:
                 logger.error("Please specify a mem type if not using Tensors")
                 new_descs = None
@@ -960,7 +963,9 @@ class nixl_agent:
                 if gpu_id == -1:  # DRAM
                     gpu_id = 0
                 new_descs = nixlBind.nixlXferDList(
-                    self.nixl_mems[mem_type], [(base_addr, region_len, gpu_id)], zero_copy
+                    self.nixl_mems[mem_type],
+                    [(base_addr, region_len, gpu_id)],
+                    zero_copy,
                 )
             else:
                 logger.error("Please use a list of contiguous Tensors")
@@ -982,7 +987,9 @@ class nixl_agent:
                     gpu_id = 0
                 dlist[i, :] = (base_addr, region_len, gpu_id)
             mem_type = "cuda" if str(tensor_type).startswith("cuda") else "cpu"
-            new_descs = nixlBind.nixlXferDList(self.nixl_mems[mem_type], dlist, zero_copy)
+            new_descs = nixlBind.nixlXferDList(
+                self.nixl_mems[mem_type], dlist, zero_copy
+            )
         else:
             new_descs = None
 

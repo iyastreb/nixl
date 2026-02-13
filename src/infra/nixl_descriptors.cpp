@@ -204,8 +204,11 @@ nixlDescList<T>::operator=(nixlDescList<T> d_list) noexcept {
     return *this;
 }
 
-template <class T>
-nixlDescList<T>::nixlDescList(nixlSerDes* deserializer) {
+template<class T>
+nixlDescList<T>::nixlDescList(nixlSerDes *deserializer)
+    : isShallowCopy_(false),
+      view_(nullptr),
+      size_(0) {
     size_t n_desc;
     std::string str;
 

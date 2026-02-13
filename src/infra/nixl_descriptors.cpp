@@ -150,21 +150,20 @@ void nixlBlobDesc::print(const std::string &suffix) const {
 // There are no virtual functions, so the object is all data, no pointers.
 
 template<class T>
-nixlDescList<T>::nixlDescList(const nixl_mem_t &type, size_t init_size) :
-    type(type),
-    descs(init_size),
-    isShallowCopy_(false) {
+nixlDescList<T>::nixlDescList(const nixl_mem_t &type, size_t init_size)
+    : type(type),
+      descs(init_size),
+      isShallowCopy_(false) {
     static_assert(std::is_base_of<nixlBasicDesc, T>::value);
     syncView();
 }
 
 template<class T>
-nixlDescList<T>::nixlDescList(const nixl_mem_t &type, const T* view, size_t size) :
-    type(type),
-    isShallowCopy_(true),
-    view_(view),
-    size_(size) {
-}
+nixlDescList<T>::nixlDescList(const nixl_mem_t &type, const T *view, size_t size)
+    : type(type),
+      isShallowCopy_(true),
+      view_(view),
+      size_(size) {}
 
 template<class T>
 nixlDescList<T>::nixlDescList(const nixlDescList<T> &d_list)
@@ -180,7 +179,8 @@ nixlDescList<T>::nixlDescList(const nixlDescList<T> &d_list)
 }
 
 template<class T>
-void nixlDescList<T>::swap(nixlDescList<T> &first, nixlDescList<T> &second) noexcept {
+void
+nixlDescList<T>::swap(nixlDescList<T> &first, nixlDescList<T> &second) noexcept {
     std::swap(first.type, second.type);
     std::swap(first.descs, second.descs);
     std::swap(first.isShallowCopy_, second.isShallowCopy_);
@@ -198,7 +198,7 @@ nixlDescList<T>::nixlDescList(nixlDescList<T> &&d_list) noexcept
 }
 
 template<class T>
-nixlDescList<T>&
+nixlDescList<T> &
 nixlDescList<T>::operator=(nixlDescList<T> d_list) noexcept {
     swap(*this, d_list);
     return *this;
@@ -257,20 +257,23 @@ nixlDescList<T>::nixlDescList(nixlSerDes* deserializer) {
     }
 }
 
-template <class T>
-void nixlDescList<T>::addDesc(T desc) {
+template<class T>
+void
+nixlDescList<T>::addDesc(T desc) {
     addDesc(std::move(desc), end());
 }
 
-template <class T>
-void nixlDescList<T>::addDesc(T desc, iterator it) {
+template<class T>
+void
+nixlDescList<T>::addDesc(T desc, iterator_t it) {
     NIXL_ASSERT(!isShallowCopy_);
     descs.insert(it, std::move(desc));
     syncView();
 }
 
-template <class T>
-void nixlDescList<T>::remDesc(size_t index) {
+template<class T>
+void
+nixlDescList<T>::remDesc(size_t index) {
     NIXL_ASSERT(!isShallowCopy_);
     if ((index >= descs.size()) || (index < 0)) {
         throw std::out_of_range("Index is out of range");
@@ -347,9 +350,9 @@ nixl_status_t nixlDescList<T>::serialize(nixlSerDes* serializer) const {
     // Optimization for nixlBasicDesc,
     // contiguous in memory, so no need for per elm serialization
     if (std::is_same<nixlBasicDesc, T>::value) {
-        ret = serializer->addStr("", std::string(
-                                 reinterpret_cast<const char*>(begin()),
-                                 n_desc * sizeof(nixlBasicDesc)));
+        ret = serializer->addStr(
+            "",
+            std::string(reinterpret_cast<const char *>(begin()), n_desc * sizeof(nixlBasicDesc)));
         if (ret) return ret;
     } else { // already checked it can be only nixlBlobDesc or nixlSectionDesc
         for (auto & elm : descs) {
@@ -460,20 +463,22 @@ int
 nixlSecDescList::getIndex(const nixlBasicDesc &query) const {
     auto itr = std::lower_bound(begin(), end(), query);
     if (itr == end()) return NIXL_ERR_NOT_FOUND;
-    if (static_cast<const nixlBasicDesc &>(*itr) == query)
-        return static_cast<int>(itr - begin());
+    if (static_cast<const nixlBasicDesc &>(*itr) == query) return static_cast<int>(itr - begin());
     return NIXL_ERR_NOT_FOUND;
 }
 
 int
 nixlSecDescList::getCoveringIndex(const nixlBasicDesc &query) const {
     auto itr = std::lower_bound(begin(), end(), query);
-    if (itr != end() && itr->covers(query))
+    if (itr != end() && itr->covers(query)) {
         return static_cast<int>(itr - begin());
+    }
     // If query and element don't have the same start address, try previous entry
     if (itr != begin()) {
         auto prev_itr = std::prev(itr, 1);
-        if (prev_itr->covers(query)) return static_cast<int>(prev_itr - begin());
+        if (prev_itr->covers(query)) {
+            return static_cast<int>(prev_itr - begin());
+        }
     }
     return -1;
 }

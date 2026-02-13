@@ -259,7 +259,7 @@ private:
     /** @var Whether the descriptor list is a shallow copy */
     bool isShallowCopy_;
     /** @var Common view of the descriptor list, both for shallow copy and own data */
-    const T* view_;
+    const T *view_;
     /** @var Size of the descriptor list */
     size_t size_;
 
@@ -284,11 +284,11 @@ private:
      *        Used internally by the makeShallowCopy to return only a const reference
      *        to the shallow copy.
      */
-    nixlDescList(const nixl_mem_t &type, const T* view, size_t size);
+    nixlDescList(const nixl_mem_t &type, const T *view, size_t size);
 
 public:
-    using iterator = typename std::vector<T>::iterator;
-    using const_iterator = const T*;
+    using iterator_t = typename std::vector<T>::iterator;
+    using const_iterator_t = const T *;
 
     /**
      * @brief Parametrized Constructor for nixlDescList
@@ -339,7 +339,7 @@ public:
      * @return Shallow copy of the descriptor list
      */
     static const nixlDescList<T>
-    makeShallowCopy(const nixl_mem_t &type, const T* view, size_t size) {
+    makeShallowCopy(const nixl_mem_t &type, const T *view, size_t size) {
         return nixlDescList<T>(type, view, size);
     }
 
@@ -390,22 +390,22 @@ public:
     /**
      * @brief Vector like iterators for const and non-const elements
      */
-    inline const_iterator
+    inline const_iterator_t
     begin() const {
         return view_;
     }
 
-    inline const_iterator
+    inline const_iterator_t
     end() const {
         return view_ + size_;
     }
 
-    inline iterator
+    inline iterator_t
     begin() {
         return descs.begin();
     }
 
-    inline iterator
+    inline iterator_t
     end() {
         return descs.end();
     }
@@ -445,7 +445,7 @@ public:
     addDesc(T desc);
 
     void
-    addDesc(T desc, iterator it);
+    addDesc(T desc, iterator_t it);
 
     /**
      * @brief Remove descriptor from list at index

@@ -235,7 +235,6 @@ nixlDescList<T>::nixlDescList(nixlSerDes* deserializer) {
         // If size is proper, deserializer cannot fail
         descs.resize(n_desc);
         str.copy(reinterpret_cast<char*>(descs.data()), str.size());
-        syncView();
 
     } else if (std::is_same<nixlBlobDesc, T>::value) {
         if (str!="nixlSDList")
@@ -251,10 +250,11 @@ nixlDescList<T>::nixlDescList(nixlSerDes* deserializer) {
             T elm(str);
             descs.push_back(elm);
         }
-        syncView();
     } else {
         return; // Unknown type, error
     }
+
+    syncView();
 }
 
 template<class T>
@@ -266,7 +266,7 @@ nixlDescList<T>::addDesc(T desc) {
 template<class T>
 void
 nixlDescList<T>::addDesc(T desc, iterator_t it) {
-    NIXL_ASSERT(!isShallowCopy_);
+    checkModifiable();
     descs.insert(it, std::move(desc));
     syncView();
 }
@@ -274,7 +274,7 @@ nixlDescList<T>::addDesc(T desc, iterator_t it) {
 template<class T>
 void
 nixlDescList<T>::remDesc(size_t index) {
-    NIXL_ASSERT(!isShallowCopy_);
+    checkModifiable();
     if ((index >= descs.size()) || (index < 0)) {
         throw std::out_of_range("Index is out of range");
     }
@@ -285,7 +285,7 @@ nixlDescList<T>::remDesc(size_t index) {
 template<class T>
 void
 nixlDescList<T>::resize(size_t count) {
-    NIXL_ASSERT(!isShallowCopy_);
+    checkModifiable();
     descs.resize(count);
     syncView();
 }

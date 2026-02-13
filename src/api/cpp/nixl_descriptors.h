@@ -22,6 +22,8 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <stdexcept>
+#include <cassert>
 #include "nixl_types.h"
 
 /**
@@ -274,6 +276,17 @@ private:
     }
 
     /**
+     * @brief Check that the descriptor list is not a shallow copy.
+     *        Throws std::logic_error if it is.
+     */
+    inline void
+    checkModifiable() const {
+        if (isShallowCopy_) {
+            throw std::logic_error("Descriptor list is a non-modifiable shallow copy");
+        }
+    }
+
+    /**
      * @brief Swap two nixlDescList objects.
      */
     static void
@@ -384,6 +397,7 @@ public:
 
     inline T &
     operator[](size_t index) {
+        assert(!isShallowCopy_);
         return descs[index];
     }
 
@@ -402,11 +416,13 @@ public:
 
     inline iterator_t
     begin() {
+        assert(!isShallowCopy_);
         return descs.begin();
     }
 
     inline iterator_t
     end() {
+        assert(!isShallowCopy_);
         return descs.end();
     }
 
@@ -434,6 +450,7 @@ public:
      */
     inline void
     clear() {
+        checkModifiable();
         descs.clear();
         syncView();
     }

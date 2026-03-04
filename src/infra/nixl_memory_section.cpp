@@ -67,6 +67,49 @@ nixl_status_t nixlMemSection::populate (const nixl_xfer_dlist_t &query,
     }
 
     const nixlSecDescList &base = it->second;
+
+    if (!query.addrs.empty()) {
+        resp.resize(query.addrs.size());
+
+        int size = base.descCount();
+        int s_index = 0;
+    
+        // Use logN search for the first element, instead of linear search
+        nixlBasicDesc query0(query.addrs[0], query.lens[0], query.devs[0]);
+        s_index = base.getCoveringIndex(query0);
+        if (s_index < 0) {
+            resp.clear();
+            return NIXL_ERR_UNKNOWN;
+        }
+        static_cast<nixlBasicDesc &>(resp[0]) = query0;
+        resp[0].metadataP = base[s_index].metadataP;
+    
+        // Walk forward for non-decreasing elements; logN search on temporal disorder
+        for (size_t i = 1; i < query.addrs.size(); ++i) {
+            nixlBasicDesc queryi(query.addrs[i], query.lens[i], query.devs[i]);
+            nixlBasicDesc queryi_1(query.addrs[i - 1], query.lens[i - 1], query.devs[i - 1]);
+            if (__builtin_expect(queryi < queryi_1, 0)) {
+                // Disorder in the list, resolve this element using logN search
+                s_index = base.getCoveringIndex(queryi);
+                if (__builtin_expect(s_index < 0, 0)) {
+                    resp.clear();
+                    return NIXL_ERR_UNKNOWN;
+                }
+            } else {
+                while (s_index < size && !base[s_index].covers(queryi))
+                    ++s_index;
+                if (__builtin_expect(s_index == size, 0)) {
+                    resp.clear();
+                    return NIXL_ERR_UNKNOWN;
+                }
+            }
+    
+            static_cast<nixlBasicDesc &>(resp[i]) = queryi;
+            resp[i].metadataP = base[s_index].metadataP;
+        }
+        return NIXL_SUCCESS;
+    }
+
     resp.resize(query.descCount());
 
     int size = base.descCount();

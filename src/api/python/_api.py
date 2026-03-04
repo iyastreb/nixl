@@ -916,6 +916,15 @@ class nixl_agent:
     @return Transfer descriptor list, nixlXferDList.
     """
 
+    def get_xfer_descs_soa(
+        self,
+        addrs,
+        lens,
+        devs,
+        mem_type: Optional[str] = None,
+    ) -> nixlBind.nixlXferDList:
+        return nixlBind.nixlXferDList(self.nixl_mems[mem_type], addrs, lens, devs)
+
     def get_xfer_descs(
         self,
         descs,

@@ -267,6 +267,10 @@ protected:
     std::vector<T> descs;
 
 public:
+    std::vector<uintptr_t> addrs;
+    std::vector<size_t> lens;
+    std::vector<uint64_t> devs;
+
     /**
      * @brief Parametrized Constructor for nixlDescList
      *
@@ -274,6 +278,13 @@ public:
      * @param init_size    initial size for descriptor list (default = 0)
      */
     nixlDescList(const nixl_mem_t &type, const int &init_size = 0);
+
+    nixlDescList(nixl_mem_t type, size_t size, const uintptr_t *addrs, const size_t *lens, const uint64_t *devs) {
+        this->type = type;
+        this->addrs = std::vector<uintptr_t>(addrs, addrs + size);
+        this->lens = std::vector<size_t>(lens, lens + size);
+        this->devs = std::vector<uint64_t>(devs, devs + size);
+    }
 
     /**
      * @brief Deserializer constructor for nixlDescList from nixlSerDes object

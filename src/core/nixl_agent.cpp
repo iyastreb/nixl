@@ -837,7 +837,7 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
 }
 
 nixl_status_t
-nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
+nixlAgent::createXferReqSoa(const nixl_xfer_op_t &operation,
                          const nixl_xfer_dlist_t &local_descs,
                          const nixl_xfer_dlist_t &remote_descs,
                          const std::string &remote_agent,
@@ -850,9 +850,9 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     req_hndl = nullptr;
 
     // Check the correspondence between descriptor lists
-    if (local_descs.descCount() != remote_descs.descCount()) {
-        NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.descCount()
-                        << ", remote=" << remote_descs.descCount() << ")";
+    if (local_descs.addrs.size() != remote_descs.addrs.size()) {
+        NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.addrs.size()
+                        << ", remote=" << remote_descs.addrs.size() << ")";
         return NIXL_ERR_INVALID_PARAM;
     }
 
@@ -864,14 +864,18 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         return NIXL_ERR_NOT_FOUND;
     }
 
+    auto start = nixlTime::getUs();
     size_t total_bytes = 0;
-    for (int i = 0; i < local_descs.descCount(); ++i) {
-        if (__builtin_expect(local_descs[i].len != remote_descs[i].len, 0)) {
+    for (size_t i = 0; i < local_descs.lens.size(); ++i) {
+        if (__builtin_expect(local_descs.lens[i] != remote_descs.lens[i], 0)) {
             NIXL_ERROR_FUNC << "length mismatch at index " << i;
             return NIXL_ERR_INVALID_PARAM;
         }
-        total_bytes += local_descs[i].len;
+        total_bytes += local_descs.lens[i];
     }
+    auto end = nixlTime::getUs();
+    data->validation_time += end - start;
+    NIXL_WARN << "SOA Validation time: " << (end - start) << " us";
 
     if (!extra_params || extra_params->backends.size() == 0) {
         // Finding backends that support the corresponding memories
@@ -912,6 +916,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
 
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
+    start = nixlTime::getUs();
     for (auto &backend : backend_set) {
         // If populate fails, it clears the resp before return
         ret1 = data->memorySection->populate(
@@ -925,6 +930,9 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
             break;
         }
     }
+    end = nixlTime::getUs();
+    data->population_time += end - start;
+    NIXL_WARN << "SOA Population time: " << (end - start) << " us";
 
     if (!handle->engine) {
         NIXL_ERROR_FUNC << "no specified or potential backend had the required "
@@ -973,6 +981,164 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         data->addErrorTelemetry(ret1);
         return ret1;
     }
+
+    NIXL_WARN << "TOTAL SOA validation time: " << data->validation_time << " us, population time: " << data->population_time << " us";
+
+    req_hndl = handle.release();
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
+                         const nixl_xfer_dlist_t &local_descs,
+                         const nixl_xfer_dlist_t &remote_descs,
+                         const std::string &remote_agent,
+                         nixlXferReqH* &req_hndl,
+                         const nixl_opt_args_t* extra_params) const {
+    nixl_status_t ret1, ret2;
+    nixl_opt_b_args_t opt_args;
+    backend_set_t backend_set;
+
+    req_hndl = nullptr;
+
+    if (!local_descs.addrs.empty()) {
+        return createXferReqSoa(operation, local_descs, remote_descs, remote_agent, req_hndl, extra_params);
+    }
+
+    // Check the correspondence between descriptor lists
+    if (local_descs.descCount() != remote_descs.descCount()) {
+        NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.descCount()
+                        << ", remote=" << remote_descs.descCount() << ")";
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    NIXL_SHARED_LOCK_GUARD(data->lock);
+    if (data->remoteSections.count(remote_agent) == 0)
+    {
+        NIXL_ERROR_FUNC << "metadata for remote agent '" << remote_agent << "' not found";
+        data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
+        return NIXL_ERR_NOT_FOUND;
+    }
+
+    auto start = nixlTime::getUs();
+    size_t total_bytes = 0;
+    for (int i = 0; i < local_descs.descCount(); ++i) {
+        if (__builtin_expect(local_descs[i].len != remote_descs[i].len, 0)) {
+            NIXL_ERROR_FUNC << "length mismatch at index " << i;
+            return NIXL_ERR_INVALID_PARAM;
+        }
+        total_bytes += local_descs[i].len;
+    }
+    auto end = nixlTime::getUs();
+    data->validation_time += end - start;
+    NIXL_WARN << "Validation time: " << (end - start) << " us";
+
+    if (!extra_params || extra_params->backends.size() == 0) {
+        // Finding backends that support the corresponding memories
+        // locally and remotely, and find the common ones.
+        backend_set_t* local_set =
+            data->memorySection->queryBackends(local_descs.getType());
+        backend_set_t* remote_set =
+            data->remoteSections[remote_agent]->queryBackends(
+                                                remote_descs.getType());
+        if (!local_set || !remote_set) {
+            NIXL_ERROR_FUNC << "no backends found for local or remote for their "
+                               "corresponding memory type";
+            return NIXL_ERR_NOT_FOUND;
+        }
+
+        for (auto & elm : *local_set)
+            if (remote_set->count(elm) != 0) {
+                backend_set.insert(elm);
+            }
+
+        if (backend_set.empty()) {
+            NIXL_ERROR_FUNC << "no potential backend found to be able to do the transfer";
+            return NIXL_ERR_NOT_FOUND;
+        }
+    } else {
+        for (auto & elm : extra_params->backends)
+            backend_set.insert(elm->engine);
+    }
+
+    // TODO: when central KV is supported, add a call to fetchRemoteMD
+    // TODO: merge descriptors back to back in memory (like makeXferReq).
+    // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
+
+    std::unique_ptr<nixlXferReqH> handle = std::make_unique<nixlXferReqH>();
+    handle->initiatorDescs = new nixl_meta_dlist_t(local_descs.getType());
+
+    handle->targetDescs = new nixl_meta_dlist_t(remote_descs.getType());
+
+    // Currently we loop through and find first local match. Can use a
+    // preference list or more exhaustive search.
+    start = nixlTime::getUs();
+    for (auto &backend : backend_set) {
+        // If populate fails, it clears the resp before return
+        ret1 = data->memorySection->populate(
+                     local_descs, backend, *handle->initiatorDescs);
+        ret2 = data->remoteSections[remote_agent]->populate(
+                     remote_descs, backend, *handle->targetDescs);
+
+        if ((ret1 == NIXL_SUCCESS) && (ret2 == NIXL_SUCCESS)) {
+            NIXL_INFO << "Selected backend: " << backend->getType();
+            handle->engine = backend;
+            break;
+        }
+    }
+    end = nixlTime::getUs();
+    data->population_time += end - start;
+    NIXL_WARN << "Population time: " << (end - start) << " us";
+
+    if (!handle->engine) {
+        NIXL_ERROR_FUNC << "no specified or potential backend had the required "
+                           "registrations to be able to do the transfer";
+        data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
+        return NIXL_ERR_NOT_FOUND;
+    }
+
+    if (extra_params) {
+        if (extra_params->hasNotif) {
+            opt_args.notifMsg = extra_params->notifMsg;
+            opt_args.hasNotif = true;
+        }
+
+        if (extra_params->customParam.length() > 0)
+            opt_args.customParam = extra_params->customParam;
+    }
+
+    if (opt_args.hasNotif && (!handle->engine->supportsNotif())) {
+        NIXL_ERROR_FUNC << "the selected backend '" << handle->engine->getType()
+                        << "' does not support notifications";
+        data->addErrorTelemetry(NIXL_ERR_BACKEND);
+        return NIXL_ERR_BACKEND;
+    }
+
+    handle->remoteAgent = remote_agent;
+    handle->backendOp = operation;
+    handle->status = NIXL_ERR_NOT_POSTED;
+    handle->notifMsg = opt_args.notifMsg;
+    handle->hasNotif = opt_args.hasNotif;
+
+    if (data->telemetryEnabled) {
+        handle->telemetry.totalBytes = total_bytes;
+        handle->telemetry.descCount = handle->initiatorDescs->descCount();
+    }
+
+    ret1 = handle->engine->prepXfer (handle->backendOp,
+                                     *handle->initiatorDescs,
+                                     *handle->targetDescs,
+                                     handle->remoteAgent,
+                                     handle->backendHandle,
+                                     &opt_args);
+    if (ret1 != NIXL_SUCCESS) {
+        NIXL_ERROR_FUNC << "backend '" << handle->engine->getType()
+                        << "' failed to prepare the transfer request with status " << ret1;
+        data->addErrorTelemetry(ret1);
+        return ret1;
+    }
+
+    NIXL_WARN << "TOTAL validation time: " << data->validation_time << " us, population time: " << data->population_time << " us";
 
     req_hndl = handle.release();
     return NIXL_SUCCESS;

@@ -217,6 +217,15 @@ PYBIND11_MODULE(_bindings, m) {
 
     py::class_<nixl_xfer_dlist_t>(m, "nixlXferDList")
         .def(py::init<nixl_mem_t, int>(), py::arg("type"), py::arg("init_size") = 0)
+        .def(py::init([](nixl_mem_t mem, py::array addrs, py::array lens, py::array devs) {
+            if (addrs.ndim() != 1 || lens.ndim() != 1 || devs.ndim() != 1)
+                throw std::invalid_argument("addrs, lens, and devs must be 1D numpy arrays");
+            if (addrs.shape(0) != lens.shape(0) || addrs.shape(0) != devs.shape(0))
+                throw std::invalid_argument("addrs, lens, and devs must have the same length");
+            size_t n = addrs.shape(0);
+            nixl_xfer_dlist_t new_list(mem, n, (uintptr_t*)addrs.data(), (size_t*)lens.data(), (uint64_t*)devs.data());
+            return new_list;
+        }))
         .def(py::init([](nixl_mem_t mem, py::array descs) {
                  static_assert(sizeof(nixlBasicDesc) == 3 * sizeof(uint64_t),
                                "nixlBasicDesc size mismatch");

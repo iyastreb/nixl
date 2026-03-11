@@ -22,8 +22,8 @@
 #include <vector>
 #include <string>
 #include <algorithm>
-#include <stdexcept>
 #include <cassert>
+#include <stdexcept>
 #include "nixl_types.h"
 
 /**
@@ -83,7 +83,12 @@ public:
      *        Comparison criteria is devID, then addr, then len
      */
     bool
-    operator<(const nixlBasicDesc &desc) const;
+    operator<(const nixlBasicDesc &desc) const noexcept {
+        if (devId != desc.devId) return (devId < desc.devId);
+        if (addr != desc.addr) return (addr < desc.addr);
+        return (len < desc.len);
+    }
+
     /**
      * @brief Operator overloading (==) to compare BasicDesc objects
      *
@@ -108,7 +113,11 @@ public:
      * @param query   nixlBasicDesc object
      */
     bool
-    covers(const nixlBasicDesc &query) const;
+    covers(const nixlBasicDesc &query) const noexcept {
+        return (devId == query.devId) && (addr <= query.addr) &&
+            ((addr + len) >= (query.addr + query.len));
+    }
+
     /**
      * @brief Check for overlap between BasicDesc objects
      *
@@ -279,7 +288,7 @@ private:
      * @brief Check that the descriptor list is not a shallow copy.
      *        Throws std::logic_error if it is.
      */
-    inline void
+    void
     checkModifiable() const {
         if (isShallowCopy_) {
             throw std::logic_error("Descriptor list is a non-modifiable shallow copy");
@@ -372,12 +381,12 @@ public:
     /**
      * @brief       Get count of descriptors
      */
-    inline int
+    int
     descCount() const {
         return size_;
     }
 
-    inline size_t
+    size_t
     size() const {
         return size_;
     }
@@ -404,23 +413,23 @@ public:
     /**
      * @brief Vector like iterators for const and non-const elements
      */
-    inline const_iterator_t
+    const_iterator_t
     begin() const {
         return view_;
     }
 
-    inline const_iterator_t
+    const_iterator_t
     end() const {
         return view_ + size_;
     }
 
-    inline iterator_t
+    iterator_t
     begin() {
         assert(!isShallowCopy_);
         return descs.begin();
     }
 
-    inline iterator_t
+    iterator_t
     end() {
         assert(!isShallowCopy_);
         return descs.end();
@@ -522,5 +531,6 @@ using nixl_reg_dlist_t = nixlDescList<nixlBlobDesc>;
  *        used for preparing a memory view handle for remote buffers
  */
 using nixl_remote_dlist_t = nixlDescList<nixlRemoteDesc>;
+using nixl_local_dlist_t = nixlDescList<nixlBasicDesc>;
 
 #endif

@@ -80,8 +80,9 @@ public:
      * @brief Operator overloading (<) to compare BasicDesc objects
      *        Comparison criteria is devID, then addr, then len
      */
+    template<typename Query>
     bool
-    operator<(const nixlBasicDesc &desc) const noexcept {
+    operator<(const Query &desc) const noexcept {
         if (devId != desc.devId) return (devId < desc.devId);
         if (addr != desc.addr) return (addr < desc.addr);
         return (len < desc.len);
@@ -110,8 +111,9 @@ public:
      *
      * @param query   nixlBasicDesc object
      */
+    template<typename Query>
     bool
-    covers(const nixlBasicDesc &query) const noexcept {
+    covers(const Query &query) const noexcept {
         return (devId == query.devId) && (addr <= query.addr) &&
             ((addr + len) >= (query.addr + query.len));
     }
@@ -135,6 +137,19 @@ public:
      */
     void
     print(const std::string &suffix) const;
+};
+
+struct nixlBasicDescRef {
+    const uintptr_t &addr;
+    const size_t &len;
+    const uint64_t &devId;
+
+    bool
+    operator<(const nixlBasicDescRef &desc) const noexcept {
+        if (devId != desc.devId) return (devId < desc.devId);
+        if (addr != desc.addr) return (addr < desc.addr);
+        return (len < desc.len);
+    }
 };
 
 /**

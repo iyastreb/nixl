@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include "nixl_types.h"
+#include "nixl_soa.h"
 #include "nixl_descriptors.h"
 #include "common/nixl_time.h"
 
@@ -133,5 +134,27 @@ operator==(const nixlRemoteMetaDesc &lhs, const nixlRemoteMetaDesc &rhs) {
 
 typedef nixlDescList<nixlMetaDesc> nixl_meta_dlist_t;
 using nixl_remote_meta_dlist_t = nixlDescList<nixlRemoteMetaDesc>;
+
+namespace nixlTag {
+    struct metadata {
+        using valueType = nixlBackendMD*;
+        static constexpr const char* name = "metadata";
+        static constexpr bool required = true;
+        static constexpr bool allowScalar = true;
+        static constexpr nixlBackendMD* defaultValue = nullptr;
+    };
+}
+
+using nixlMetaArrayBase = nixlXferArrayBase::extend<nixlTag::metadata>;
+
+class nixlMetaArray : public nixlMetaArrayBase {
+public:
+    using builder = nixlMetaArrayBase::builder;
+
+    nixlMetaArray(nixl_mem_t mem_type) : nixlMetaArrayBase(mem_type) {}
+    nixlMetaArray(nixlMetaArrayBase&& base) : nixlMetaArrayBase(std::move(base)) {}
+};
+
+typedef nixlMetaArray nixl_meta_array_t;
 
 #endif

@@ -22,12 +22,43 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <variant>
 
 #include "nixl_types.h"
 #include "backend_aux.h"
 #include "telemetry_event.h"
 
 constexpr size_t MAX_TELEMETRY_QUEUE_SIZE = 1000;
+
+struct nixlBackendXfer {
+    const nixl_xfer_op_t backendOp;
+    const std::string remoteAgent;
+
+    std::unique_ptr<nixl_meta_dlist_t> srcList;
+    std::unique_ptr<nixl_meta_dlist_t> dstList;
+    std::unique_ptr<nixl_meta_array_t> srcArray;
+    std::unique_ptr<nixl_meta_array_t> dstArray;
+
+    nixlBackendXfer(nixl_xfer_op_t op,
+                    const std::string &remote,
+                    std::unique_ptr<nixl_meta_dlist_t> &&src,
+                    std::unique_ptr<nixl_meta_dlist_t> &&dst)
+        : backendOp(op),
+          remoteAgent(remote),
+          srcList(std::move(src)),
+          dstList(std::move(dst)) {}
+
+    nixlBackendXfer(nixl_xfer_op_t op,
+                    const std::string &remote,
+                    std::unique_ptr<nixl_meta_array_t> &&src,
+                    std::unique_ptr<nixl_meta_array_t> &&dst)
+        : backendOp(op),
+          remoteAgent(remote),
+          srcArray(std::move(src)),
+          dstArray(std::move(dst)) {}
+
+    bool isNewApi() const { return srcArray && dstArray; }
+};
 
 // Base backend engine class for different backend implementations
 class nixlBackendEngine {
@@ -141,6 +172,21 @@ class nixlBackendEngine {
                                         const nixl_opt_b_args_t* opt_args=nullptr
                                        ) const = 0;
 
+        virtual nixl_status_t
+        prepXfer(const nixlBackendXfer &xfer,
+                 nixlBackendReqH* &handle,
+                 const nixl_opt_b_args_t* opt_args=nullptr) const {
+            if (xfer.isNewApi()) {
+                return NIXL_ERR_NOT_SUPPORTED;
+            }
+            return prepXfer(xfer.backendOp,
+                            *xfer.srcList,
+                            *xfer.dstList,
+                            xfer.remoteAgent,
+                            handle,
+                            opt_args);
+        }
+
         // Posting a request, which completes the async handle creation and posts it
         virtual nixl_status_t postXfer (const nixl_xfer_op_t &operation,
                                         const nixl_meta_dlist_t &local,
@@ -149,6 +195,21 @@ class nixlBackendEngine {
                                         nixlBackendReqH* &handle,
                                         const nixl_opt_b_args_t* opt_args=nullptr
                                        ) const = 0;
+
+        virtual nixl_status_t
+        postXfer(const nixlBackendXfer &xfer,
+                 nixlBackendReqH* &handle,
+                 const nixl_opt_b_args_t* opt_args=nullptr) const {
+            if (xfer.isNewApi()) {
+                return NIXL_ERR_NOT_SUPPORTED;
+            }
+            return postXfer(xfer.backendOp,
+                            *xfer.srcList,
+                            *xfer.dstList,
+                            xfer.remoteAgent,
+                            handle,
+                            opt_args);
+        }
 
         // Use a handle to progress backend engine and see if a transfer is completed or not
         virtual nixl_status_t checkXfer(nixlBackendReqH* handle) const = 0;

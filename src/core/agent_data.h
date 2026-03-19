@@ -68,6 +68,9 @@ class nixlAgentData {
         nixlLock        lock;
         bool telemetryEnabled = false;
         bool efaWarningChecked = false;
+        nixlTime::us_t validation_time = 0;
+        nixlTime::us_t population_time = 0;
+        nixlTime::us_t prep_ucx_time = 0;
 
         // some handle that can be used to instantiate an object from the lib
         std::map<std::string, void*> backendLibs;

@@ -24,6 +24,7 @@
 #include "nixl_types.h"
 #include "nixl_params.h"
 #include "nixl_descriptors.h"
+#include "nixl_soa.h"
 #include <chrono>
 #include <memory>
 
@@ -254,6 +255,14 @@ class nixlAgent {
                        const std::string &remote_agent,
                        nixlXferReqH* &req_hndl,
                        const nixl_opt_args_t* extra_params = nullptr) const;
+
+        nixl_status_t
+        createXferReq(const nixl_xfer_op_t &operation,
+                      const nixl_xfer_array_t &local_descs,
+                      const nixl_xfer_array_t &remote_descs,
+                      const std::string &remote_agent,
+                      nixlXferReqH *&req_hndl,
+                      const nixl_opt_args_t *extra_params = nullptr) const;
 
         /*** Operations on prepared Transfer Request ***/
 

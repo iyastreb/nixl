@@ -36,11 +36,21 @@ enum nixl_telemetry_stat_status_t {
 // and verified DescLists, and other state and metadata needed for a NIXL transfer
 class nixlXferReqH {
 public:
-    nixlXferReqH(const std::string &remote_agent,
+    nixlXferReqH(nixlBackendEngine *engine,
+                 nixl_blob_t notifMsg,
+                 bool hasNotif,
+                 const std::string &remote_agent,
                  const nixl_xfer_op_t backend_op,
-                 const nixl_mem_t local_type,
-                 const nixl_mem_t remote_type,
-                 const size_t desc_count = 0);
+                 std::unique_ptr<nixl_meta_dlist_t> &&srcList,
+                 std::unique_ptr<nixl_meta_dlist_t> &&dstList);
+
+    nixlXferReqH(nixlBackendEngine *engine,
+                 nixl_blob_t notifMsg,
+                 bool hasNotif,
+                 const std::string &remote_agent,
+                 const nixl_xfer_op_t backend_op,
+                 std::unique_ptr<nixl_meta_array_t> &&srcList,
+                 std::unique_ptr<nixl_meta_array_t> &&dstList);
 
     ~nixlXferReqH() {
         if ((backendHandle != nullptr) && (engine != nullptr)) {
@@ -55,19 +65,13 @@ public:
 
 private:
     nixlBackendEngine *engine = nullptr;
-    nixlBackendReqH *backendHandle = nullptr;
-
-    const std::unique_ptr<nixl_meta_dlist_t> initiatorDescs;
-    const std::unique_ptr<nixl_meta_dlist_t> targetDescs;
-
-    const std::string remoteAgent;
     nixl_blob_t notifMsg;
     bool hasNotif = false;
-
-    const nixl_xfer_op_t backendOp;
-    nixl_status_t status = NIXL_ERR_NOT_POSTED;
+    nixlBackendXfer xfer;
 
     nixl_xfer_telem_t telemetry;
+    nixlBackendReqH *backendHandle = nullptr;
+    nixl_status_t status = NIXL_ERR_NOT_POSTED;
 };
 
 struct nixlDlistH {

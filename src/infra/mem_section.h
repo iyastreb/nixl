@@ -81,8 +81,19 @@ public:
     int
     getIndex(const nixlBasicDesc &query) const override;
 
+    template<typename Query>
     int
-    getCoveringIndex(const nixlBasicDesc &query) const;
+    getCoveringIndex(const Query &query) const {
+        auto itr = std::lower_bound(descs.begin(), descs.end(), query);
+        if (itr != descs.end() && itr->covers(query))
+            return static_cast<int>(itr - descs.begin());
+        // If query and element don't have the same start address, try previous entry
+        if (itr != descs.begin()) {
+            auto prev_itr = std::prev(itr, 1);
+            if (prev_itr->covers(query)) return static_cast<int>(prev_itr - descs.begin());
+        }
+        return -1;
+    }
 
     void
     resize(const size_t &count) override;
@@ -117,6 +128,9 @@ class nixlMemSection {
         nixl_status_t populate (const nixl_xfer_dlist_t &query,
                                 nixlBackendEngine* backend,
                                 nixl_meta_dlist_t &resp) const;
+
+        nixl_status_t populate(nixlBackendEngine* backend,
+                               nixl_meta_array_t &resp) const;
 
         [[nodiscard]] nixl_status_t
         addElement(const nixlRemoteDesc &query,

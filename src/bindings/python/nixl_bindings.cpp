@@ -215,6 +215,57 @@ PYBIND11_MODULE(_bindings, m) {
     py::register_exception<nixlCancelledError>(m, "nixlCancelledError");
     py::register_exception<nixlNoTelemetryError>(m, "nixlNoTelemetryError");
 
+    py::class_<nixl_xfer_array_t>(m, "nixlXferArray")
+        .def(py::init([](nixl_mem_t mem, py::array addrs, py::array lengths,
+                         py::object dev_ids, py::object strides,
+                         py::object stride_counts, bool zero_copy) {
+            auto builder = nixl_xfer_array_t::builder()
+                                .setSize(addrs.shape(0))
+                                .setMemType(mem);
+
+            auto apply_array = [&](auto tag_struct, py::array arr) {
+                using Tag = decltype(tag_struct);
+                const auto* ptr = static_cast<const typename Tag::valueType*>(arr.data());
+                if (zero_copy) {
+                    builder.template setArrayPtr<Tag>(ptr);
+                } else {
+                    builder.template setArrayCopy<Tag>(ptr);
+                }
+            };
+
+            auto apply_union = [&](auto tag_struct, py::object obj) {
+                using Tag = decltype(tag_struct);
+                if (obj.is_none()) return;
+
+                if (py::isinstance<py::int_>(obj)) {
+                    builder.template setScalar<Tag>(obj.cast<typename Tag::valueType>());
+                } else if (py::isinstance<py::array>(obj)) {
+                    apply_array(tag_struct, obj.cast<py::array>());
+                }
+            };
+
+            apply_array(nixlTag::addr{}, addrs);
+            apply_array(nixlTag::length{}, lengths);
+            apply_union(nixlTag::devId{}, dev_ids);
+            apply_union(nixlTag::stride{}, strides);
+            apply_union(nixlTag::strideCount{}, stride_counts);
+
+            return builder.template make<nixl_xfer_array_t>();
+        }),
+        py::arg("addrs").noconvert(),
+        py::arg("lengths").noconvert(),
+        py::arg("dev_ids"),
+        py::arg("mem"),
+        py::arg("strides") = py::none(),
+        py::arg("stride_counts") = py::none(),
+        py::arg("zero_copy") = true,
+
+        py::keep_alive<1, 3>(),
+        py::keep_alive<1, 4>(),
+        py::keep_alive<1, 5>(),
+        py::keep_alive<1, 6>(),
+        py::keep_alive<1, 7>());
+
     py::class_<nixl_xfer_dlist_t>(m, "nixlXferDList")
         .def(py::init<nixl_mem_t, int>(), py::arg("type"), py::arg("init_size") = 0)
         .def(py::init([](nixl_mem_t mem, py::array descs) {
@@ -655,6 +706,37 @@ PYBIND11_MODULE(_bindings, m) {
                const nixl_xfer_op_t &operation,
                const nixl_xfer_dlist_t &local_descs,
                const nixl_xfer_dlist_t &remote_descs,
+               const std::string &remote_agent,
+               const std::string &notif_msg,
+               const std::vector<uintptr_t> &backends) -> uintptr_t {
+                nixlXferReqH *handle = nullptr;
+                nixl_opt_args_t extra_params;
+
+                for (uintptr_t backend : backends)
+                    extra_params.backends.push_back((nixlBackendH *)backend);
+
+                if (notif_msg.size() > 0) {
+                    extra_params.notif = notif_msg;
+                }
+                nixl_status_t ret = agent.createXferReq(
+                    operation, local_descs, remote_descs, remote_agent, handle, &extra_params);
+
+                throw_nixl_exception(ret);
+                return (uintptr_t)handle;
+            },
+            py::arg("operation"),
+            py::arg("local_descs"),
+            py::arg("remote_descs"),
+            py::arg("remote_agent"),
+            py::arg("notif_msg") = std::string(""),
+            py::arg("backend") = std::vector<uintptr_t>({}),
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "createXferReqSoA",
+            [](nixlAgent &agent,
+               const nixl_xfer_op_t &operation,
+               const nixl_xfer_array_t &local_descs,
+               const nixl_xfer_array_t &remote_descs,
                const std::string &remote_agent,
                const std::string &notif_msg,
                const std::vector<uintptr_t> &backends) -> uintptr_t {

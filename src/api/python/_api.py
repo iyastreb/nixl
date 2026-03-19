@@ -587,6 +587,26 @@ class nixl_agent:
 
         return nixl_xfer_handle(self.agent, handle)
 
+    def initialize_xfer_soa(
+        self,
+        operation: str,
+        local_descs: nixlBind.nixlXferArray,
+        remote_descs: nixlBind.nixlXferArray,
+        remote_agent: str,
+        notif_msg: bytes = b"",
+        backends: list[str] = [],
+    ) -> nixl_xfer_handle:
+        op = self.nixl_ops[operation]
+        handle_list = []
+        for backend_string in backends:
+            handle_list.append(self.backends[backend_string])
+
+        handle = self.agent.createXferReqSoA(
+            op, local_descs, remote_descs, remote_agent, notif_msg, handle_list
+        )
+
+        return nixl_xfer_handle(self.agent, handle)
+
     """
     @brief  Initiate a data transfer operation.
             After calling this, the transfer state can be checked asynchronously till completion.
@@ -986,6 +1006,19 @@ class nixl_agent:
             new_descs = None
 
         return new_descs
+
+    def get_xfer_descs_soa(
+        self,
+        addrs: np.ndarray,
+        lengths: np.ndarray,
+        dev_ids: Union[int, np.ndarray],
+        mem_type: Optional[str] = None,
+        strides: Optional[Union[int, np.ndarray]] = None,
+        stride_counts: Optional[Union[int, np.ndarray]] = None,
+        zero_copy: bool = True,
+    ) -> nixlBind.nixlXferArray:
+        return nixlBind.nixlXferArray(self.nixl_mems[mem_type], addrs, lengths,
+                                      dev_ids, strides, stride_counts, zero_copy)
 
     """
     @brief Get nixlRegDList from different input types:

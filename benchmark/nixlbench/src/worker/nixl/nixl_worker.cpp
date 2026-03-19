@@ -1246,10 +1246,52 @@ execTransferIterations(nixlAgent *agent,
                        const bool recreate_per_iteration) {
     nixlXferReqH *req = nullptr;
     nixlTime::us_t total_prepare_duration = 0;
+    const char *new_api_env = getenv("NIXL_NEW_API");
+    int new_api = (new_api_env != NULL) ? atoi(new_api_env) : 0;
+
+    nixl_xfer_array_t src_array(local_desc.getType());
+    nixl_xfer_array_t dst_array(remote_desc.getType());
+    std::vector<uintptr_t> src_addrs;
+    std::vector<uintptr_t> dst_addrs;
+    std::vector<uintptr_t> lengths;
+    uint64_t src_dev_id;
+    uint64_t dst_dev_id;
+
+    if (new_api) {
+        src_addrs.resize(local_desc.descCount());
+        dst_addrs.resize(remote_desc.descCount());
+        lengths.resize(local_desc.descCount());
+
+        for (int i = 0; i < local_desc.descCount(); ++i) {
+            src_addrs[i] = local_desc[i].addr;
+            dst_addrs[i] = remote_desc[i].addr;
+            lengths[i] = local_desc[i].len;
+        }
+
+        src_dev_id = local_desc[0].devId;
+        dst_dev_id = remote_desc[0].devId;
+
+        src_array = nixl_xfer_array_t::builder()
+            .setSize(local_desc.descCount())
+            .setMemType(local_desc.getType())
+            .setArrayPtr<nixlTag::addr>(src_addrs.data())
+            .setArrayPtr<nixlTag::length>(lengths.data())
+            .setScalar<nixlTag::devId>(src_dev_id)
+            .make<nixl_xfer_array_t>();
+
+        dst_array = nixl_xfer_array_t::builder()
+            .setSize(remote_desc.descCount())
+            .setMemType(remote_desc.getType())
+            .setArrayPtr<nixlTag::addr>(dst_addrs.data())
+            .setArrayPtr<nixlTag::length>(lengths.data())
+            .setScalar<nixlTag::devId>(dst_dev_id)
+            .make<nixl_xfer_array_t>();
+    }
 
     // Create request once if not recreating per iteration
     if (!recreate_per_iteration) {
-        nixl_status_t create_rc =
+        nixl_status_t create_rc = new_api ?
+            agent->createXferReq(op, src_array, dst_array, target, req, &params) :
             agent->createXferReq(op, local_desc, remote_desc, target, req, &params);
         if (NIXL_SUCCESS != create_rc) {
             std::cerr << "createXferReq failed: " << nixlEnumStrings::statusStr(create_rc)
@@ -1264,8 +1306,9 @@ execTransferIterations(nixlAgent *agent,
     if (__builtin_expect(recreate_per_iteration, 0)) {
         // GUSLI path: Create/execute/release per iteration
         for (int i = 0; i < num_iter; ++i) {
-            nixl_status_t create_rc =
-                agent->createXferReq(op, local_desc, remote_desc, target, req, &params);
+            nixl_status_t create_rc = new_api ?
+                    agent->createXferReq(op, src_array, dst_array, target, req, &params) :
+                    agent->createXferReq(op, local_desc, remote_desc, target, req, &params);
             if (__builtin_expect(create_rc != NIXL_SUCCESS, 0)) {
                 std::cerr << "createXferReq failed: " << nixlEnumStrings::statusStr(create_rc)
                           << std::endl;

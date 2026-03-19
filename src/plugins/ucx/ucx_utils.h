@@ -25,6 +25,7 @@ extern "C" {
 }
 
 #include <nixl_types.h>
+#include "backend/backend_aux.h"
 
 #include "absl/status/statusor.h"
 #include "absl/strings/numbers.h"
@@ -71,7 +72,107 @@ nixl_b_params_get(const nixl_b_params_t *custom_params, const std::string &key, 
     }
 }
 
-using nixlUcxReq = void *;
+using nixlUcxReq = void*;
+
+namespace nixlTag {
+    struct memh {
+        using valueType = ucp_mem_h;
+        static constexpr const char* name = "memh";
+        static constexpr bool required = true;
+        static constexpr bool allowScalar = true;
+        static constexpr ucp_mem_h defaultValue = nullptr;
+    };
+
+    struct rkey {
+        using valueType = ucp_rkey_h;
+        static constexpr const char* name = "rkey";
+        static constexpr bool required = true;
+        static constexpr bool allowScalar = true;
+        static constexpr ucp_rkey_h defaultValue = nullptr;
+    };
+}
+
+using nixlUcxSrcArrayBase = nixlMetaArrayBase::extend<nixlTag::memh>;
+
+class nixlUcxSrcArray : public nixlUcxSrcArrayBase {
+public:
+    nixlUcxSrcArray(nixlUcxSrcArrayBase&& base)
+        : nixlUcxSrcArrayBase(std::move(base)) {}
+
+    ucp_dt_vector_t
+    toLocalVector(size_t start_idx) const {
+        ucp_dt_vector_t v = {};
+        v.field_mask = UCP_DT_VECTOR_FIELD_ADDRS |
+                       UCP_DT_VECTOR_FIELD_LENGTHS |
+                       UCP_DT_VECTOR_FIELD_KEYS;
+        v.addrs.local = (void* const *)get<nixlTag::addr>().data() + start_idx;
+        v.lengths = get<nixlTag::length>().data() + start_idx;
+        v.keys.local = get<nixlTag::memh>().data() + start_idx;
+        return v;
+    }
+};
+
+using nixlUcxDstArrayBase = nixlMetaArrayBase::extend<nixlTag::rkey>;
+
+class nixlUcxDstArray : public nixlUcxDstArrayBase {
+public:
+    nixlUcxDstArray(nixlUcxDstArrayBase&& base)
+        : nixlUcxDstArrayBase(std::move(base)) {}
+
+    ucp_dt_vector_t
+    toRemoteVector(size_t start_idx) const {
+        ucp_dt_vector_t v = {};
+        v.field_mask = UCP_DT_VECTOR_FIELD_ADDRS |
+                       UCP_DT_VECTOR_FIELD_LENGTHS |
+                       UCP_DT_VECTOR_FIELD_KEYS;
+        v.addrs.remote = get<nixlTag::addr>().data() + start_idx;
+        v.lengths = get<nixlTag::length>().data() + start_idx;
+        v.keys.remote = get<nixlTag::rkey>().data() + start_idx;
+        return v;
+    }
+};
+
+struct nixlUcxVectorDesc {
+    std::vector<void *> local_vas;
+    std::vector<uint64_t> remote_vas;
+    std::vector<size_t> lengths;
+    std::vector<ucp_mem_h> memhs;
+    std::vector<ucp_rkey_h> rkeys;
+
+    void
+    resize(size_t n) {
+        local_vas.resize(n);
+        remote_vas.resize(n);
+        lengths.resize(n);
+        memhs.resize(n);
+        rkeys.resize(n);
+    }
+
+    ucp_dt_vector_t
+    toLocalVector(size_t start_idx) const {
+        ucp_dt_vector_t v = {};
+        v.field_mask = UCP_DT_VECTOR_FIELD_ADDRS |
+                       UCP_DT_VECTOR_FIELD_LENGTHS |
+                       UCP_DT_VECTOR_FIELD_KEYS;
+        v.addrs.local = local_vas.data() + start_idx;
+        v.lengths = lengths.data() + start_idx;
+        v.keys.local = memhs.data() + start_idx;
+        return v;
+    }
+
+    ucp_dt_vector_t
+    toRemoteVector(size_t start_idx) const {
+        ucp_dt_vector_t v = {};
+        v.field_mask = UCP_DT_VECTOR_FIELD_ADDRS |
+                       UCP_DT_VECTOR_FIELD_LENGTHS |
+                       UCP_DT_VECTOR_FIELD_KEYS;
+        v.addrs.remote = remote_vas.data() + start_idx;
+        v.lengths = lengths.data() + start_idx;
+        v.keys.remote = rkeys.data() + start_idx;
+        return v;
+    }
+};
+using nixlUcxVector = std::unique_ptr<nixlUcxVectorDesc>;
 
 namespace nixl::ucx {
 class rkey;
@@ -161,6 +262,16 @@ public:
                  nixl_cost_t &method);
     nixl_status_t
     flushEp(nixlUcxReq &req);
+
+    [[nodiscard]] nixl_status_t
+    postVector(const nixlUcxVectorDesc *vec, nixlUcxReq &req, size_t start_idx, size_t end_idx);
+
+    [[nodiscard]] nixl_status_t
+    postVectors(const nixlUcxSrcArray &src_array,
+                const nixlUcxDstArray &dst_array,
+                nixlUcxReq &req,
+                size_t start_idx,
+                size_t end_idx);
 
     [[nodiscard]] ucp_ep_h
     getEp() const noexcept {
@@ -258,6 +369,10 @@ public:
     /* Active message handling */
     int
     regAmCallback(unsigned msg_id, ucp_am_recv_callback_t cb, void *arg);
+
+    [[nodiscard]] ucp_worker_h getWorkerHandle() const noexcept {
+        return worker.get();
+    }
 
     /* Data access */
     int

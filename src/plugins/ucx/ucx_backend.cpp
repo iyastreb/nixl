@@ -62,6 +62,12 @@ private:
     };
     std::optional<Notif> notif;
 
+    // Vector API support
+    nixlUcxVector vector_handle_;
+    std::unique_ptr<nixlUcxSrcArray> src_array_;
+    std::unique_ptr<nixlUcxDstArray> dst_array_;
+    bool use_vector_api_;
+
     nixl_status_t
     checkConnection(nixl_status_t status = NIXL_SUCCESS) const {
         NIXL_ASSERT(!connections_.empty());
@@ -77,7 +83,48 @@ private:
 public:
     nixlUcxBackendH(nixlUcxWorker *worker, size_t worker_id)
         : worker(worker),
-          worker_id(worker_id) {}
+          worker_id(worker_id),
+          use_vector_api_(false) {}
+
+    void
+    setPreparedVector(nixlUcxVector handle) {
+        vector_handle_ = std::move(handle);
+        use_vector_api_ = true;
+    }
+
+    void
+    setPreparedVectors(nixlUcxSrcArray src_array, nixlUcxDstArray dst_array) {
+        src_array_ = std::make_unique<nixlUcxSrcArray>(std::move(src_array));
+        dst_array_ = std::make_unique<nixlUcxDstArray>(std::move(dst_array));
+        use_vector_api_ = true;
+    }
+
+    nixlUcxVectorDesc *
+    getVectorHandle() const {
+        return vector_handle_.get();
+    }
+
+    nixlUcxSrcArray *
+    getSrcArray() const {
+        return src_array_.get();
+    }
+
+    nixlUcxDstArray *
+    getDstArray() const {
+        return dst_array_.get();
+    }
+
+    void
+    releaseVector() {
+        vector_handle_.reset();
+        src_array_.reset();
+        dst_array_.reset();
+    }
+
+    bool
+    useVectorApi() const {
+        return use_vector_api_;
+    }
 
     auto &
     notification() {
@@ -132,6 +179,7 @@ public:
         }
         requests_.clear();
         connections_.clear();
+
         return NIXL_SUCCESS;
     }
 
@@ -475,6 +523,9 @@ struct nixlUcxBackendSharedState {
 void
 nixlUcxChunkBackendH::complete(nixl_status_t status) {
     NIXL_ASSERT(sharedState_.get() != nullptr);
+
+    releaseVector();
+
     if (status != NIXL_SUCCESS) {
         nixlUcxBackendH::release();
         sharedState_->status.store(status);
@@ -661,7 +712,7 @@ nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &in
     numSharedWorkers_ = getWorkers().size() - num_threads;
     NIXL_ASSERT(numSharedWorkers_ > 0);
 
-    splitBatchSize_ = nixl_b_params_get(init_params.customParams, "split_batch_size", 1024);
+    splitVectorSize_ = nixl_b_params_get(init_params.customParams, "split_batch_size", 1024);
 
     if (init_params.enableProgTh) {
         sharedThread_ =
@@ -705,17 +756,55 @@ nixlUcxThreadPoolEngine::prepXfer(const nixl_xfer_op_t &operation,
                                   nixlBackendReqH *&handle,
                                   const nixl_opt_b_args_t *opt_args) const {
     size_t batch_size = local.descCount();
-    if (batch_size < splitBatchSize_) {
+    if (batch_size < splitVectorSize_) {
         return nixlUcxEngine::prepXfer(operation, local, remote, remote_agent, handle, opt_args);
     }
 
-    size_t chunk_size = std::max(batch_size / dedicatedThreads_.size(), splitBatchSize_);
+    size_t chunk_size = std::max(batch_size / dedicatedThreads_.size(), splitVectorSize_);
     size_t num_chunks = (batch_size + chunk_size - 1) / chunk_size;
 
     size_t worker_id = getWorkerId();
     auto comp_handle =
         new nixlUcxCompositeBackendH(getWorker(worker_id).get(), worker_id, chunk_size, num_chunks);
     NIXL_TRACE << "created " << *comp_handle;
+
+    nixl_status_t status = initHandle(operation, local, remote, remote_agent, worker_id, *comp_handle);
+    if (status != NIXL_SUCCESS) {
+        delete comp_handle;
+        return status;
+    }
+
+    handle = comp_handle;
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxThreadPoolEngine::prepXfer(const nixlBackendXfer &xfer,
+                                  nixlBackendReqH *&handle,
+                                  const nixl_opt_b_args_t *opt_args) const {
+    if (!xfer.isNewApi()) {
+        return prepXfer(xfer.backendOp, *xfer.srcList, *xfer.dstList, xfer.remoteAgent, handle, opt_args);
+    }
+
+    size_t batch_size = xfer.srcArray->size();
+    if (batch_size < splitVectorSize_) {
+        return nixlUcxEngine::prepXfer(xfer, handle, opt_args);
+    }
+
+    size_t chunk_size = std::max(batch_size / dedicatedThreads_.size(), splitVectorSize_);
+    size_t num_chunks = (batch_size + chunk_size - 1) / chunk_size;
+
+    size_t worker_id = getWorkerId();
+    auto comp_handle =
+        new nixlUcxCompositeBackendH(getWorker(worker_id).get(), worker_id, chunk_size, num_chunks);
+    NIXL_TRACE << "created " << *comp_handle;
+
+    nixl_status_t status = initHandle(xfer, *comp_handle);
+    if (status != NIXL_SUCCESS) {
+        delete comp_handle;
+        return status;
+    }
+
     handle = comp_handle;
     return NIXL_SUCCESS;
 }
@@ -748,20 +837,81 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
         io_->post([&, i]() {
             auto thread = nixlUcxDedicatedThread::getDedicatedThread();
             NIXL_ASSERT(thread != nullptr);
+            size_t chunk_worker_id = thread->getWorkerId();
+            nixlUcxWorker *worker = thread->getWorkers()[0];
 
             nixlUcxChunkBackendH *chunk_handle =
-                comp_handle->startChunk(i, thread->getWorkers()[0], thread->getWorkerId());
-            NIXL_TRACE << "dedicated " << *thread << " starting " << *chunk_handle;
+                comp_handle->startChunk(i, worker, chunk_worker_id);
+            NIXL_TRACE << "dedicated thread starting " << *chunk_handle;
 
             size_t start_idx = i * chunk_size;
             size_t end_idx = std::min(start_idx + chunk_size, (size_t)local.descCount());
-            nixl_status_t ret = nixlUcxEngine::sendXferRange(
+
+            nixl_status_t ret = NIXL_SUCCESS;
+
+            ret = nixlUcxEngine::sendXferRange(
                 operation, local, remote, remote_agent, chunk_handle, start_idx, end_idx);
-            if (ret != NIXL_SUCCESS) {
+            if (ret < NIXL_SUCCESS) {
                 status.store(ret);
                 chunk_handle->complete(ret);
             } else {
-                NIXL_TRACE << "dedicated " << *thread << " sent " << *chunk_handle;
+                NIXL_TRACE << "dedicated thread sent " << *chunk_handle;
+                thread->addRequest(chunk_handle);
+            }
+
+            if (remaining.fetch_sub(1) == 1) {
+                promise.set_value();
+            }
+        });
+    }
+
+    future.wait();
+    NIXL_TRACE << "sent " << *comp_handle << " with status: " << status.load();
+    return status.load();
+}
+
+nixl_status_t
+nixlUcxThreadPoolEngine::sendXferRange(const nixlBackendXfer &xfer,
+                                       nixlBackendReqH *handle,
+                                       size_t start_idx,
+                                       size_t end_idx) const {
+    nixlUcxBackendH *int_handle = static_cast<nixlUcxBackendH *>(handle);
+    if (!int_handle->isComposite()) {
+        return nixlUcxEngine::sendXferRange(xfer, handle, start_idx, end_idx);
+    }
+
+    nixlUcxCompositeBackendH *comp_handle = static_cast<nixlUcxCompositeBackendH *>(int_handle);
+    comp_handle->startXfer();
+    size_t chunk_size = comp_handle->getChunkSize();
+    NIXL_TRACE << "sending " << *comp_handle;
+
+    std::promise<void> promise;
+    std::future<void> future = promise.get_future();
+    std::atomic<size_t> remaining{comp_handle->getNumChunks()};
+    std::atomic<nixl_status_t> status{NIXL_SUCCESS};
+
+    for (size_t i = 0; i < comp_handle->getNumChunks(); i++) {
+        io_->post([&, i]() {
+            auto thread = nixlUcxDedicatedThread::getDedicatedThread();
+            NIXL_ASSERT(thread != nullptr);
+            size_t chunk_worker_id = thread->getWorkerId();
+            nixlUcxWorker *worker = thread->getWorkers()[0];
+
+            nixlUcxChunkBackendH *chunk_handle =
+                comp_handle->startChunk(i, worker, chunk_worker_id);
+            NIXL_TRACE << "dedicated thread starting " << *chunk_handle;
+
+            size_t start_idx = i * chunk_size;
+            size_t end_idx = std::min(start_idx + chunk_size, xfer.srcArray->size());
+
+            nixl_status_t ret = NIXL_SUCCESS;
+
+            ret = nixlUcxEngine::sendXferRange(xfer, chunk_handle, start_idx, end_idx);
+            if (ret < NIXL_SUCCESS) {
+                status.store(ret);
+                chunk_handle->complete(ret);
+            } else {
+                NIXL_TRACE << "dedicated thread sent " << *chunk_handle;
                 thread->addRequest(chunk_handle);
             }
 
@@ -822,6 +972,9 @@ nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params)
     : nixlBackendEngine(&init_params),
       sharedWorkerIndex_(1),
       progressThreadEnabled_(init_params.enableProgTh) {
+    const char *use_batch_env = std::getenv("NIXL_UCX_USE_BATCH_API");
+    useVectorApi_ = (use_batch_env && std::strcmp(use_batch_env, "1") == 0);
+
     std::vector<std::string> devs; /* Empty vector */
     nixl_b_params_t *custom_params = init_params.customParams;
 
@@ -1098,6 +1251,132 @@ nixlUcxEngine::getWorkerIdFromOptArgs(const nixl_opt_b_args_t &opt_args) const n
     }
 }
 
+nixl_status_t
+nixlUcxEngine::prepareVectorForRange(const nixl_xfer_op_t &operation,
+                                     const nixl_meta_dlist_t &local,
+                                     const nixl_meta_dlist_t &remote,
+                                     size_t worker_id,
+                                     size_t start_idx,
+                                     size_t end_idx,
+                                     nixlUcxVector &vec_handle) const {
+    size_t vec_size = end_idx - start_idx;
+
+    auto vec = std::make_unique<nixlUcxVectorDesc>();
+    vec->resize(vec_size);
+
+    for (size_t i = start_idx; i < end_idx; i++) {
+        size_t idx = i - start_idx;
+        auto lmd = static_cast<nixlUcxPrivateMetadata *>(local[i].metadataP);
+        auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[i].metadataP);
+
+        vec->local_vas[idx] = (void *)local[i].addr;
+        vec->remote_vas[idx] = static_cast<uint64_t>(remote[i].addr);
+        vec->lengths[idx] = local[i].len;
+        vec->memhs[idx] = lmd->mem.getMemh();
+        vec->rkeys[idx] = rmd->getRkey(worker_id).get();
+    }
+
+    vec_handle = std::move(vec);
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxEngine::prepareVectors(nixlUcxSrcArray &src_array,
+                              nixlUcxDstArray &dst_array,
+                              size_t worker_id) const {
+    auto &src_metadata = src_array.get<nixlTag::metadata>();
+    std::vector<ucp_mem_h> memhs(src_array.size());
+    if (src_metadata.isScalar()) {
+        auto lmd = static_cast<nixlUcxPrivateMetadata *>(src_metadata[0]);
+        memhs.assign(src_array.size(), lmd->mem.getMemh());
+    } else {
+        for (size_t i = 0; i < src_array.size(); i++) {
+            auto lmd = static_cast<nixlUcxPrivateMetadata *>(src_metadata[i]);
+            memhs[i] = lmd->mem.getMemh();
+        }
+    }
+
+    auto &dst_metadata = dst_array.get<nixlTag::metadata>();
+    std::vector<ucp_rkey_h> rkeys(dst_array.size());
+    if (dst_metadata.isScalar()) {
+        auto rmd = static_cast<nixlUcxPublicMetadata *>(dst_metadata[0]);
+        rkeys.assign(dst_array.size(), rmd->getRkey(worker_id).get());
+    } else {
+        for (size_t i = 0; i < dst_array.size(); i++) {
+            auto rmd = static_cast<nixlUcxPublicMetadata *>(dst_metadata[i]);
+            rkeys[i] = rmd->getRkey(worker_id).get();
+        }
+    }
+
+    src_array.get<nixlTag::memh>() = nixlArray<nixlTag::memh>(std::move(memhs));
+    dst_array.get<nixlTag::rkey>() = nixlArray<nixlTag::rkey>(std::move(rkeys));
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxEngine::initHandle(const nixl_xfer_op_t &operation,
+                          const nixl_meta_dlist_t &local,
+                          const nixl_meta_dlist_t &remote,
+                          const std::string &remote_agent,
+                          size_t worker_id,
+                          nixlUcxBackendH &handle) const {
+    if (useVectorApi_) {
+        ucx_connection_ptr_t conn = getConnection(remote_agent);
+        if (!conn) {
+            NIXL_ERROR << "No connection found for remote agent: " << remote_agent;
+            return NIXL_ERR_NOT_FOUND;
+        }
+
+        // Currently only PUT vectors are supported in UCX
+        if (operation == NIXL_READ) {
+            NIXL_ERROR << "GET vector operations not yet supported";
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
+
+        size_t lcnt = local.descCount();
+
+        nixlUcxVector vec;
+        nixl_status_t vec_status = prepareVectorForRange(
+            operation, local, remote,
+            worker_id, 0, lcnt, vec);
+
+        if (vec_status != NIXL_SUCCESS) {
+            return vec_status;
+        }
+
+        handle.setPreparedVector(std::move(vec));
+    }
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxEngine::initHandle(const nixlBackendXfer &xfer, nixlUcxBackendH &handle) const {
+    if (useVectorApi_) {
+        ucx_connection_ptr_t conn = getConnection(xfer.remoteAgent);
+        if (!conn) {
+            NIXL_ERROR << "No connection found for remote agent: " << xfer.remoteAgent;
+            return NIXL_ERR_NOT_FOUND;
+        }
+
+        // Currently only PUT vectors are supported in UCX
+        if (xfer.backendOp == NIXL_READ) {
+            NIXL_ERROR << "GET vector operations not yet supported";
+            return NIXL_ERR_NOT_SUPPORTED;
+        }
+
+        nixlUcxSrcArray src_array(xfer.srcArray->view());
+        nixlUcxDstArray dst_array(xfer.dstArray->view());
+
+        nixl_status_t vec_status = prepareVectors(src_array, dst_array, handle.getWorkerId());
+        if (vec_status != NIXL_SUCCESS) {
+            return vec_status;
+        }
+
+        handle.setPreparedVectors(std::move(src_array), std::move(dst_array));
+    }
+    return NIXL_SUCCESS;
+}
+
 nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
                                        const nixl_meta_dlist_t &local,
                                        const nixl_meta_dlist_t &remote,
@@ -1112,10 +1391,39 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
 
     const auto worker_id = getWorkerId(opt_args);
     /* TODO: try to get from a pool first */
-    auto *ucx_handle = new nixlUcxBackendH(getWorker(worker_id).get(), worker_id);
+    auto ucx_handle = std::make_unique<nixlUcxBackendH>(getWorker(worker_id).get(), worker_id);
 
-    handle = ucx_handle;
+    nixl_status_t status = initHandle(operation, local, remote, remote_agent, worker_id, *ucx_handle);
+    if (status != NIXL_SUCCESS) {
+        return status;
+    }
 
+    handle = ucx_handle.release();
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t nixlUcxEngine::prepXfer (const nixlBackendXfer &xfer,
+                                       nixlBackendReqH* &handle,
+                                       const nixl_opt_b_args_t* opt_args) const
+{
+    if (!xfer.isNewApi()) {
+        return prepXfer(xfer.backendOp, *xfer.srcList, *xfer.dstList, xfer.remoteAgent, handle, opt_args);
+    }
+
+    if (xfer.srcArray->empty() || xfer.dstArray->empty()) {
+        NIXL_ERROR << "Local or remote descriptor list is empty";
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    const auto worker_id = getWorkerId(opt_args);
+    /* TODO: try to get from a pool first */
+    auto ucx_handle = std::make_unique<nixlUcxBackendH>(getWorker(worker_id).get(), worker_id);
+    nixl_status_t status = initHandle(xfer, *ucx_handle);
+    if (status != NIXL_SUCCESS) {
+        return status;
+    }
+
+    handle = ucx_handle.release();
     return NIXL_SUCCESS;
 }
 
@@ -1175,15 +1483,15 @@ nixl_status_t nixlUcxEngine::estimateXferCost (const nixl_xfer_op_t &operation,
     return NIXL_SUCCESS;
 }
 
-nixlUcxEngine::batchResult
-nixlUcxEngine::sendXferRangeBatch(nixlUcxEp &ep,
+nixlUcxEngine::vectorResult
+nixlUcxEngine::sendXferRangeVector(nixlUcxEp &ep,
                                   nixl_xfer_op_t operation,
                                   const nixl_meta_dlist_t &local,
                                   const nixl_meta_dlist_t &remote,
                                   size_t worker_id,
                                   size_t start_idx,
                                   size_t end_idx) {
-    batchResult result = {NIXL_SUCCESS, 0, nullptr};
+    vectorResult result = {NIXL_SUCCESS, 0, nullptr};
 
     for (size_t i = start_idx; i < end_idx; ++i) {
         void *laddr = (void *)local[i].addr;
@@ -1201,6 +1509,54 @@ nixlUcxEngine::sendXferRangeBatch(nixlUcxEp &ep,
         ++result.size;
         nixlUcxReq req;
         nixl_status_t ret = operation == NIXL_READ ?
+            ep.read(raddr, rmd->getRkey(worker_id), laddr, lmd->mem, lsize, req) :
+            ep.write(laddr, lmd->mem, raddr, rmd->getRkey(worker_id), lsize, req);
+
+        if (ret == NIXL_IN_PROG) {
+            if (__builtin_expect(result.req != nullptr, 1)) {
+                ucp_request_free(result.req);
+            }
+            result.req = req;
+        } else if (ret != NIXL_SUCCESS) {
+            result.status = ret;
+            if (result.req != nullptr) {
+                ucp_request_free(result.req);
+                result.req = nullptr;
+            }
+            break;
+        }
+    }
+
+    if (result.status == NIXL_SUCCESS && result.req) {
+        result.status = NIXL_IN_PROG;
+    }
+    return result;
+}
+
+nixlUcxEngine::vectorResult
+nixlUcxEngine::sendXferRangeVector(nixlUcxEp &ep,
+                                   const nixlBackendXfer &xfer,
+                                   size_t worker_id,
+                                   size_t start_idx,
+                                   size_t end_idx) {
+    vectorResult result = {NIXL_SUCCESS, 0, nullptr};
+
+    for (size_t i = start_idx; i < end_idx; ++i) {
+        void *laddr = (void *)xfer.srcArray->get<nixlTag::addr>()[i];
+        size_t lsize = xfer.srcArray->get<nixlTag::length>()[i];
+        uint64_t raddr = static_cast<uint64_t>(xfer.dstArray->get<nixlTag::addr>()[i]);
+        NIXL_ASSERT(lsize == xfer.dstArray->get<nixlTag::length>()[i]);
+
+        auto lmd = static_cast<nixlUcxPrivateMetadata *>(xfer.srcArray->get<nixlTag::metadata>()[i]);
+        auto rmd = static_cast<nixlUcxPublicMetadata *>(xfer.dstArray->get<nixlTag::metadata>()[i]);
+        auto &rmd_ep = rmd->conn->getEp(worker_id);
+        if (__builtin_expect(rmd_ep.get() != &ep, 0)) {
+            break;
+        }
+
+        ++result.size;
+        nixlUcxReq req;
+        nixl_status_t ret = xfer.backendOp == NIXL_READ ?
             ep.read(raddr, rmd->getRkey(worker_id), laddr, lmd->mem, lsize, req) :
             ep.write(laddr, lmd->mem, raddr, rmd->getRkey(worker_id), lsize, req);
 
@@ -1245,11 +1601,15 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
      * one flush request, and one notification request */
     intHandle->reserve(3);
 
+    if (intHandle->useVectorApi()) {
+        return postPreparedVector(intHandle, remote_agent, start_idx, end_idx);
+    }
+
     for (size_t i = start_idx; i < end_idx;) {
         /* Send requests to a single EP */
         auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[i].metadataP);
         auto &ep = rmd->conn->getEp(workerId);
-        auto result = sendXferRangeBatch(*ep, operation, local, remote, workerId, i, end_idx);
+        auto result = sendXferRangeVector(*ep, operation, local, remote, workerId, i, end_idx);
 
         /* Append a single pending request for the entire EP batch */
         ret = intHandle->append(result.status, result.req, rmd->conn);
@@ -1278,6 +1638,140 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
 }
 
 nixl_status_t
+nixlUcxEngine::sendXferRange(const nixlBackendXfer &xfer,
+                             nixlBackendReqH *handle,
+                             size_t start_idx,
+                             size_t end_idx) const {
+    if (!xfer.isNewApi()) {
+        return sendXferRange(xfer.backendOp, *xfer.srcList, *xfer.dstList, xfer.remoteAgent, handle, start_idx, end_idx);
+    }
+
+    nixlUcxBackendH *intHandle = (nixlUcxBackendH *)handle;
+    size_t workerId = intHandle->getWorkerId();
+    nixl_status_t ret;
+
+    if (xfer.backendOp != NIXL_WRITE && xfer.backendOp != NIXL_READ) {
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    /* Assuming we have a single EP, we need 3 requests: one pending request,
+     * one flush request, and one notification request */
+    intHandle->reserve(3);
+
+    if (intHandle->useVectorApi()) {
+        return postPreparedVector(intHandle, xfer.remoteAgent, start_idx, end_idx);
+    }
+
+    auto &rmds = xfer.dstArray->get<nixlTag::metadata>();
+    for (size_t i = start_idx; i < end_idx;) {
+        /* Send requests to a single EP */
+        auto rmd = static_cast<nixlUcxPublicMetadata *>(rmds[i]);
+        auto &ep = rmd->conn->getEp(workerId);
+        auto result = sendXferRangeVector(*ep, xfer, workerId, i, end_idx);
+
+        /* Append a single pending request for the entire EP batch */
+        ret = intHandle->append(result.status, result.req, rmd->conn);
+        if (ret != NIXL_SUCCESS) {
+            return ret;
+        }
+
+        i += result.size;
+    }
+
+    /*
+     * Flush keeps intHandle non-empty until the operation is actually
+     * completed, which can happen after local requests completion.
+     * We need to flush all distinct connections to ensure that the operation
+     * is actually completed.
+     */
+    for (auto &conn : intHandle->getConnections()) {
+        nixlUcxReq req;
+        ret = conn->getEp(workerId)->flushEp(req);
+        if (intHandle->append(ret, req, conn) != NIXL_SUCCESS) {
+            return ret;
+        }
+    }
+
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxEngine::postPreparedVector(nixlUcxBackendH *int_handle,
+                                  const std::string &remote_agent,
+                                  size_t start_idx,
+                                  size_t end_idx) const {
+    ucx_connection_ptr_t conn = getConnection(remote_agent);
+    if (!conn) {
+        return NIXL_ERR_NOT_FOUND;
+    }
+
+    size_t worker_id = int_handle->getWorkerId();
+    auto &ep = conn->getEp(worker_id);
+    nixlUcxVectorDesc *vec = int_handle->getVectorHandle();
+
+    int_handle->reserve(3);
+
+    nixlUcxReq vec_req = nullptr;
+    nixl_status_t ret;
+    if (vec != nullptr) {
+        ret = ep->postVector(vec, vec_req, start_idx, end_idx);
+    } else {
+        ret = ep->postVectors(*int_handle->getSrcArray(), *int_handle->getDstArray(), vec_req, start_idx, end_idx);
+    }
+
+    if (ret < NIXL_SUCCESS) {
+        return ret;
+    }
+
+    ret = int_handle->append(ret, vec_req, conn);
+    if (ret != NIXL_SUCCESS) {
+        return ret;
+    }
+
+    nixlUcxReq flush_req;
+    ret = ep->flushEp(flush_req);
+    if (int_handle->append(ret, flush_req, conn) != NIXL_SUCCESS) {
+        return ret;
+    }
+
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxEngine::postXferVector(nixlUcxBackendH *int_handle,
+                              const std::string &remote_agent,
+                              const nixl_opt_b_args_t *opt_args,
+                              size_t start_idx,
+                              size_t end_idx) const {
+    nixl_status_t ret = postPreparedVector(int_handle, remote_agent, start_idx, end_idx);
+    if (ret != NIXL_SUCCESS) {
+        return ret;
+    }
+
+    ret = int_handle->status();
+    if (opt_args && opt_args->hasNotif) {
+        ucx_connection_ptr_t conn = getConnection(remote_agent);
+        if (!conn) {
+            return NIXL_ERR_NOT_FOUND;
+        }
+
+        if (ret == NIXL_SUCCESS) {
+            nixlUcxReq notif_req;
+            ret = notifSendPriv(remote_agent, opt_args->notifMsg,
+                              conn->getEp(int_handle->getWorkerId()), &notif_req);
+            if (int_handle->append(ret, notif_req, conn) != NIXL_SUCCESS) {
+                return ret;
+            }
+            ret = int_handle->status();
+        } else if (ret == NIXL_IN_PROG) {
+            int_handle->notification().emplace(remote_agent, opt_args->notifMsg);
+        }
+    }
+
+    return ret;
+}
+
+nixl_status_t
 nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
                         const nixl_meta_dlist_t &local,
                         const nixl_meta_dlist_t &remote,
@@ -1296,6 +1790,10 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
     }
 
     // TODO: assert that handle is empty/completed, as we can't post request before completion
+
+    if (int_handle->useVectorApi()) {
+        return postXferVector(int_handle, remote_agent, opt_args, 0, lcnt);
+    }
 
     ret = sendXferRange(operation, local, remote, remote_agent, handle, 0, lcnt);
     if (ret != NIXL_SUCCESS) {
@@ -1318,6 +1816,58 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
             ret = int_handle->status();
         } else if (ret == NIXL_IN_PROG) {
             int_handle->notification().emplace(remote_agent, opt_args->notifMsg);
+        }
+    }
+
+    return ret;
+}
+
+nixl_status_t
+nixlUcxEngine::postXfer(const nixlBackendXfer &xfer,
+                        nixlBackendReqH *&handle,
+                        const nixl_opt_b_args_t *opt_args) const {
+    if (!xfer.isNewApi()) {
+        return postXfer(xfer.backendOp, *xfer.srcList, *xfer.dstList, xfer.remoteAgent, handle, opt_args);
+    }
+
+    size_t lcnt = xfer.srcArray->size();
+    size_t rcnt = xfer.dstArray->size();
+    nixlUcxBackendH *int_handle = static_cast<nixlUcxBackendH *>(handle);
+    nixl_status_t ret;
+
+    if (lcnt != rcnt) {
+        NIXL_ERROR << "Local (" << lcnt << ") and remote (" << rcnt
+                   << ") descriptor lists differ in size";
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    // TODO: assert that handle is empty/completed, as we can't post request before completion
+
+    if (int_handle->useVectorApi()) {
+        return postXferVector(int_handle, xfer.remoteAgent, opt_args, 0, lcnt);
+    }
+
+    ret = sendXferRange(xfer, handle, 0, lcnt);
+    if (ret != NIXL_SUCCESS) {
+        return ret;
+    }
+
+    ret = int_handle->status();
+    if (opt_args && opt_args->hasNotif) {
+        if (ret == NIXL_SUCCESS) {
+            nixlUcxReq req;
+            auto rmd = (nixlUcxPublicMetadata *)xfer.dstArray->get<nixlTag::metadata>()[0];
+            ret = notifSendPriv(xfer.remoteAgent,
+                                opt_args->notifMsg,
+                                rmd->conn->getEp(int_handle->getWorkerId()),
+                                &req);
+            if (int_handle->append(ret, req, rmd->conn) != NIXL_SUCCESS) {
+                return ret;
+            }
+
+            ret = int_handle->status();
+        } else if (ret == NIXL_IN_PROG) {
+            int_handle->notification().emplace(xfer.remoteAgent, opt_args->notifMsg);
         }
     }
 
@@ -1359,6 +1909,9 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
 nixl_status_t nixlUcxEngine::releaseReqH(nixlBackendReqH* handle) const
 {
     nixlUcxBackendH *intHandle = (nixlUcxBackendH *)handle;
+
+    intHandle->releaseVector();
+
     nixl_status_t status = intHandle->release();
 
     /* TODO: return to a pool instead. */

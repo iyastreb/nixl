@@ -55,6 +55,8 @@ class nixlUcxConnection : public nixlBackendConnMD {
 
 using ucx_connection_ptr_t = std::shared_ptr<nixlUcxConnection>;
 
+class nixlUcxBackendH;
+
 // A private metadata has to implement get, and has all the metadata
 class nixlUcxPrivateMetadata : public nixlBackendMD {
     private:
@@ -75,6 +77,7 @@ class nixlUcxPrivateMetadata : public nixlBackendMD {
         }
 
     friend class nixlUcxEngine;
+    friend class nixlUcxThreadPoolEngine;
 };
 
 // A public metadata has to implement put, and only has the remote metadata
@@ -163,6 +166,11 @@ public:
              const nixl_opt_b_args_t *opt_args = nullptr) const override;
 
     nixl_status_t
+    prepXfer(const nixlBackendXfer &xfer,
+             nixlBackendReqH *&handle,
+             const nixl_opt_b_args_t *opt_args = nullptr) const override;
+
+    nixl_status_t
     estimateXferCost(const nixl_xfer_op_t &operation,
                      const nixl_meta_dlist_t &local,
                      const nixl_meta_dlist_t &remote,
@@ -174,10 +182,28 @@ public:
                      const nixl_opt_args_t *opt_args = nullptr) const override;
 
     nixl_status_t
+    postPreparedVector(nixlUcxBackendH *int_handle,
+                       const std::string &remote_agent,
+                       size_t start_idx,
+                       size_t end_idx) const;
+
+    [[nodiscard]] nixl_status_t
+    postXferVector(nixlUcxBackendH *int_handle,
+                   const std::string &remote_agent,
+                   const nixl_opt_b_args_t *opt_args,
+                   size_t start_idx,
+                   size_t end_idx) const;
+
+    nixl_status_t
     postXfer(const nixl_xfer_op_t &operation,
              const nixl_meta_dlist_t &local,
              const nixl_meta_dlist_t &remote,
              const std::string &remote_agent,
+             nixlBackendReqH *&handle,
+             const nixl_opt_b_args_t *opt_args = nullptr) const override;
+
+    nixl_status_t
+    postXfer(const nixlBackendXfer &xfer,
              nixlBackendReqH *&handle,
              const nixl_opt_b_args_t *opt_args = nullptr) const override;
 
@@ -244,8 +270,43 @@ protected:
                   size_t start_idx,
                   size_t end_idx) const;
 
+    virtual nixl_status_t
+    sendXferRange(const nixlBackendXfer &xfer,
+                  nixlBackendReqH *handle,
+                  size_t start_idx,
+                  size_t end_idx) const;
+
+    ucx_connection_ptr_t
+    getConnection(const std::string &remote_agent) const;
+
+    nixl_status_t
+    prepareVectorForRange(const nixl_xfer_op_t &operation,
+                          const nixl_meta_dlist_t &local,
+                          const nixl_meta_dlist_t &remote,
+                          size_t worker_id,
+                          size_t start_idx,
+                          size_t end_idx,
+                          nixlUcxVector &batch_handle) const;
+
+    nixl_status_t
+    prepareVectors(nixlUcxSrcArray &src_array,
+                   nixlUcxDstArray &dst_array,
+                   size_t worker_id) const;
+
+    nixl_status_t
+    initHandle(const nixl_xfer_op_t &operation,
+               const nixl_meta_dlist_t &local,
+               const nixl_meta_dlist_t &remote,
+               const std::string &remote_agent,
+               size_t worker_id,
+               nixlUcxBackendH &handle) const;
+
+    nixl_status_t
+    initHandle(const nixlBackendXfer &xfer, nixlUcxBackendH &handle) const;
+
     nixlUcxEngine(const nixlBackendInitParams &init_params);
 
+    bool useVectorApi_;
 private:
     // Memory management helpers
     nixl_status_t
@@ -266,23 +327,27 @@ private:
                   const std::unique_ptr<nixlUcxEp> &ep,
                   nixlUcxReq *req = nullptr) const;
 
-    ucx_connection_ptr_t
-    getConnection(const std::string &remote_agent) const;
-
-    struct batchResult {
+    struct vectorResult {
         nixl_status_t status;
         size_t size;
         nixlUcxReq req;
     };
 
-    static batchResult
-    sendXferRangeBatch(nixlUcxEp &ep,
-                       nixl_xfer_op_t operation,
-                       const nixl_meta_dlist_t &local,
-                       const nixl_meta_dlist_t &remote,
-                       size_t worker_id,
-                       size_t start_idx,
-                       size_t end_idx);
+    static vectorResult
+    sendXferRangeVector(nixlUcxEp &ep,
+                        nixl_xfer_op_t operation,
+                        const nixl_meta_dlist_t &local,
+                        const nixl_meta_dlist_t &remote,
+                        size_t worker_id,
+                        size_t start_idx,
+                        size_t end_idx);
+
+    static vectorResult
+    sendXferRangeVector(nixlUcxEp &ep,
+                        const nixlBackendXfer &xfer,
+                        size_t worker_id,
+                        size_t start_idx,
+                        size_t end_idx);
 
     /**
      * Get the worker ID from the optional arguments.
@@ -333,6 +398,8 @@ namespace asio {
 class io_context;
 }
 
+class nixlUcxChunkBackendH;
+
 class nixlUcxThreadPoolEngine : public nixlUcxEngine {
 public:
     nixlUcxThreadPoolEngine(const nixlBackendInitParams &init_params);
@@ -343,6 +410,11 @@ public:
              const nixl_meta_dlist_t &local,
              const nixl_meta_dlist_t &remote,
              const std::string &remote_agent,
+             nixlBackendReqH *&handle,
+             const nixl_opt_b_args_t *opt_args = nullptr) const override;
+
+    nixl_status_t
+    prepXfer(const nixlBackendXfer &xfer,
              nixlBackendReqH *&handle,
              const nixl_opt_b_args_t *opt_args = nullptr) const override;
 
@@ -367,6 +439,12 @@ protected:
                   size_t start_idx,
                   size_t end_idx) const override;
 
+    virtual nixl_status_t
+    sendXferRange(const nixlBackendXfer &xfer,
+                  nixlBackendReqH *handle,
+                  size_t start_idx,
+                  size_t end_idx) const;
+
 private:
     std::unique_ptr<asio::io_context> io_;
     std::unique_ptr<nixlUcxThread> sharedThread_;
@@ -374,7 +452,7 @@ private:
     size_t numSharedWorkers_;
     std::mutex notifMutex_;
     notif_list_t notifThread_;
-    size_t splitBatchSize_;
+    size_t splitVectorSize_;
 };
 
 #endif

@@ -17,12 +17,12 @@
 
 #include "ucx_utils.h"
 
-#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #include <nixl_types.h>
 
@@ -371,6 +371,82 @@ nixlUcxEp::flushEp(nixlUcxReq &req) {
         return NIXL_IN_PROG;
     }
 
+    return ucx_status_to_nixl(UCS_PTR_STATUS(request));
+}
+
+nixl_status_t
+nixlUcxEp::postVector(const nixlUcxVectorDesc *vec, nixlUcxReq &req, size_t start_idx, size_t end_idx)
+{
+    nixl_status_t status = checkTxState();
+    if (status != NIXL_SUCCESS) {
+        return status;
+    }
+
+    if (vec == nullptr || vec->local_vas.empty()) {
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    size_t count = end_idx - start_idx;
+    ucp_dt_vector_t local_vec = vec->toLocalVector(start_idx);
+    ucp_dt_vector_t remote_vec = vec->toRemoteVector(start_idx);
+
+    ucp_request_param_t param = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_DATATYPE |
+                        UCP_OP_ATTR_FIELD_REMOTE_DATATYPE |
+                        UCP_OP_ATTR_FIELD_REMOTE_COUNT,
+        .datatype = ucp_dt_make_vector(),
+        .remote_datatype = ucp_dt_make_vector(),
+        .remote = &remote_vec,
+        .remote_count = count
+    };
+
+    ucs_status_ptr_t request = ucp_put_nbx(
+        eph, &local_vec, count, 0, NULL, &param);
+
+    if (UCS_PTR_IS_PTR(request)) {
+        req = request;
+        return NIXL_IN_PROG;
+    }
+
+    req = nullptr;
+    return ucx_status_to_nixl(UCS_PTR_STATUS(request));
+}
+
+nixl_status_t
+nixlUcxEp::postVectors(const nixlUcxSrcArray &src_array,
+                       const nixlUcxDstArray &dst_array,
+                       nixlUcxReq &req,
+                       size_t start_idx,
+                       size_t end_idx)
+{
+    nixl_status_t status = checkTxState();
+    if (status != NIXL_SUCCESS) {
+        return status;
+    }
+
+    size_t count = end_idx - start_idx;
+    ucp_dt_vector_t local_vec = src_array.toLocalVector(start_idx);
+    ucp_dt_vector_t remote_vec = dst_array.toRemoteVector(start_idx);
+
+    ucp_request_param_t param = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_DATATYPE |
+                        UCP_OP_ATTR_FIELD_REMOTE_DATATYPE |
+                        UCP_OP_ATTR_FIELD_REMOTE_COUNT,
+        .datatype = ucp_dt_make_vector(),
+        .remote_datatype = ucp_dt_make_vector(),
+        .remote = &remote_vec,
+        .remote_count = count
+    };
+
+    ucs_status_ptr_t request = ucp_put_nbx(
+        eph, &local_vec, count, 0, NULL, &param);
+
+    if (UCS_PTR_IS_PTR(request)) {
+        req = request;
+        return NIXL_IN_PROG;
+    }
+
+    req = nullptr;
     return ucx_status_to_nixl(UCS_PTR_STATUS(request));
 }
 

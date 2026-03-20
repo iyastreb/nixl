@@ -260,6 +260,7 @@ PYBIND11_MODULE(_bindings, m) {
         py::arg("stride_counts") = py::none(),
         py::arg("zero_copy") = true,
 
+        py::keep_alive<1, 2>(),
         py::keep_alive<1, 3>(),
         py::keep_alive<1, 4>(),
         py::keep_alive<1, 5>(),

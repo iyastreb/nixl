@@ -76,16 +76,32 @@ class nixl_prepped_dlist_handle:
        the handle in leaked xfer handles list, which will be re-released during agent destruction
 @param agent Owning nixl_agent used to perform release operations.
 @param value Internal handle
+@param local_xfer_array Optional local side nixlXferArray (e.g. from initialize_xfer_soa); kept for object lifetime.
+@param remote_xfer_array Optional remote side nixlXferArray; kept for object lifetime.
 """
 
 
 class nixl_xfer_handle:
-    __slots__ = ("_handle", "_agent", "_released")
+    __slots__ = (
+        "_handle",
+        "_agent",
+        "_released",
+        "_local_xfer_array",
+        "_remote_xfer_array",
+    )
 
-    def __init__(self, agent, value: int):
+    def __init__(
+        self,
+        agent,
+        value: int,
+        local_xfer_array: Optional[nixlBind.nixlXferArray] = None,
+        remote_xfer_array: Optional[nixlBind.nixlXferArray] = None,
+    ):
         self._handle = int(value)
         self._agent = agent
         self._released = False
+        self._local_xfer_array = local_xfer_array
+        self._remote_xfer_array = remote_xfer_array
 
     def __repr__(self) -> str:
         return f"nixl_xfer_handle(0x{self._handle:x}, released={self._released})"
@@ -94,6 +110,8 @@ class nixl_xfer_handle:
         if not self._released:
             self._agent.releaseXferReq(self._handle)
             self._released = True
+            self._local_xfer_array = None
+            self._remote_xfer_array = None
 
     def __del__(self):
         if not self._released:
@@ -530,6 +548,8 @@ class nixl_agent:
         notif_msg: bytes = b"",
         backends: list[str] = [],
         skip_desc_merge: bool = False,
+        local_xfer_array: Optional[nixlBind.nixlXferArray] = None,
+        remote_xfer_array: Optional[nixlBind.nixlXferArray] = None,
     ) -> nixl_xfer_handle:
         op = self.nixl_ops[operation]
         handle_list = []
@@ -547,7 +567,12 @@ class nixl_agent:
             skip_desc_merge,
         )
 
-        return nixl_xfer_handle(self.agent, handle)
+        return nixl_xfer_handle(
+            self.agent,
+            handle,
+            local_xfer_array=local_xfer_array,
+            remote_xfer_array=remote_xfer_array,
+        )
 
     """
     @brief  Initialize a transfer operation. This is a combined API, to create a transfer request
@@ -605,7 +630,12 @@ class nixl_agent:
             op, local_descs, remote_descs, remote_agent, notif_msg, handle_list
         )
 
-        return nixl_xfer_handle(self.agent, handle)
+        return nixl_xfer_handle(
+            self.agent,
+            handle,
+            local_xfer_array=local_descs,
+            remote_xfer_array=remote_descs,
+        )
 
     """
     @brief  Initiate a data transfer operation.

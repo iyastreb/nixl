@@ -115,63 +115,29 @@ nixl_status_t nixlMemSection::populate(nixlBackendEngine* backend,
     }
 
     const nixlSecDescList &base = it->second;
-    std::vector<nixlBackendMD*> metadata;
+    size_t resp_size = resp.size();
+    std::vector<nixlBackendMD*> metadata(resp_size);
 
-    int size = base.descCount();
+    for (size_t i = 0; i < resp_size;) {
+        auto query = resp.getDesc(i);
+        int s_index = base.getCoveringIndex(query);
+        if (__builtin_expect(s_index < 0, 0)) {
+            return NIXL_ERR_UNKNOWN;
+        }
 
-    // Use logN search for the first element, instead of linear search
-    int s_index = base.getCoveringIndex(resp.getDesc(0));
-    if (s_index < 0) {
-        return NIXL_ERR_UNKNOWN;
-    }
-    nixlBackendMD* metadata0 = base[s_index].metadataP;
-
-    // Walk forward for non-decreasing elements; logN search on temporal disorder
-    for (size_t i = 1; i < resp.size(); ++i) {
         size_t start_idx = i;
-
-        // Iterate over elements while last MD covers it
-        for (; i < resp.size(); ++i) {
+        for (; i < resp_size; ++i) {
             auto query = resp.getDesc(i);
             if (__builtin_expect(!base[s_index].covers(query), 0)) {
                 break;
             }
         }
 
-        if (__builtin_expect(i > start_idx, 1)) {
-            auto md = base[s_index].metadataP;
-            if (__builtin_expect(metadata0 != md, 0)) {
-                if (metadata.empty()) {
-                    metadata.assign(resp.size(), metadata0);
-                }
-                std::fill(metadata.begin() + start_idx, metadata.begin() + i, md);
-            }
-        }
-
-        if (i == resp.size()) {
-            break;
-        }
-
-        // Slow path: resolve the element using logN search
-        auto query = resp.getDesc(i);
-        if (__builtin_expect(query < resp.getDesc(i - 1), 0)) {
-            // Disorder in the list, resolve this element using logN search
-            s_index = base.getCoveringIndex(query);
-            if (__builtin_expect(s_index < 0, 0)) {
-                return NIXL_ERR_UNKNOWN;
-            }
-        } else {
-            while (s_index < size && !base[s_index].covers(query))
-                ++s_index;
-            if (__builtin_expect(s_index == size, 0)) {
-                return NIXL_ERR_UNKNOWN;
-            }
-        }
+        std::fill(metadata.begin() + start_idx, metadata.begin() + i,
+                  base[s_index].metadataP);
     }
 
-    resp.get<nixlTag::metadata>() = metadata.empty() ?
-        nixlArray<nixlTag::metadata>(metadata0) :
-        nixlArray<nixlTag::metadata>(std::move(metadata));
+    resp.get<nixlTag::metadata>() = nixlArray<nixlTag::metadata>(std::move(metadata));
     return NIXL_SUCCESS;
 }
 

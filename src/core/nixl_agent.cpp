@@ -291,6 +291,11 @@ nixlAgent::createBackend(const nixl_backend_t &type,
         return NIXL_ERR_INVALID_PARAM;
     }
 
+    if (data->backendsById_.size() >= nixlBackendMask::MAX_BACKENDS) {
+        NIXL_ERROR_FUNC << "maximum number of backends reached";
+        return NIXL_ERR_BACKEND;
+    }
+
     // Check if the plugin is in an illegal combination with another plugin backend already created
     for (const auto &combination : illegal_plugin_combinations) {
         if (std::find(combination.begin(), combination.end(), type) != combination.end()) {
@@ -313,6 +318,7 @@ nixlAgent::createBackend(const nixl_backend_t &type,
     init_params.pthrDelay = data->config_.pthrDelay;
     init_params.syncMode = data->config_.syncMode;
     init_params.enableTelemetry_ = (data->telemetry_ != nullptr);
+    init_params.backendId_ = data->backendsById_.size();
 
     // First, try to load the backend as a plugin
     auto& plugin_manager = nixlPluginManager::getInstance();
@@ -381,6 +387,7 @@ nixlAgent::createBackend(const nixl_backend_t &type,
     bknd_hndl = it->second.get();
 
     data->backendEngines_.try_emplace(type, std::move(backend));
+    data->backendsById_.push_back(data->backendEngines_[type].get());
 
     // TODO: Check if backend supports ProgThread
     //       when threading is in agent

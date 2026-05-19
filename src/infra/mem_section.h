@@ -32,6 +32,32 @@
 using section_key_t = std::pair<nixl_mem_t, nixlBackendEngine*>;
 using backend_set_t = std::set<nixlBackendEngine*>;
 
+// Compact set of backend engines, addressed by each engine's id (bit position).
+class nixlBackendMask {
+public:
+    static constexpr unsigned MAX_BACKENDS = 64;
+
+    void
+    insert(const nixlBackendEngine *be) noexcept {
+        bits_ |= uint64_t{1} << be->getBackendId();
+    }
+
+    bool
+    contains(const nixlBackendEngine *be) const noexcept {
+        return (bits_ & (uint64_t{1} << be->getBackendId())) != 0;
+    }
+
+    bool
+    empty() const noexcept {
+        return bits_ == 0;
+    }
+
+private:
+    uint64_t bits_ = 0;
+};
+
+using nixl_backend_mask_t = nixlBackendMask;
+
 struct nixlEngineDeleter {
     void
     operator()(nixlBackendEngine *) const noexcept;

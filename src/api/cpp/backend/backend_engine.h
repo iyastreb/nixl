@@ -35,6 +35,7 @@ class nixlBackendEngine {
         // Members that cannot be modified by a child backend and parent bookkeep
         nixl_backend_t  backendType;
         nixl_b_params_t customParams;
+        const uint64_t  backendId_;
         std::vector<nixlTelemetryEvent> telemetryEvents_;
         std::mutex telemetryEventsMutex_;
 
@@ -74,6 +75,7 @@ class nixlBackendEngine {
         explicit nixlBackendEngine(const nixlBackendInitParams *init_params)
             : backendType(init_params->type),
               customParams(*init_params->customParams),
+              backendId_(init_params->backendId_),
               localAgent(init_params->localAgent),
               enableTelemetry_(init_params->enableTelemetry_) {}
 
@@ -94,6 +96,7 @@ class nixlBackendEngine {
         bool getInitErr() const noexcept { return initErr; }
         const nixl_backend_t& getType() const noexcept { return backendType; }
         const nixl_b_params_t& getCustomParams() const noexcept { return customParams; }
+        uint64_t getBackendId() const noexcept { return backendId_; }
 
         // The support function determine which methods are necessary by the child backend, and
         // if they're called by mistake, they will return error if not implemented by backend.

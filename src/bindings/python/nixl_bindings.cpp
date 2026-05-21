@@ -22,6 +22,7 @@
 
 #include <tuple>
 #include <iostream>
+#include <memory>
 
 #include "nixl.h"
 #include "serdes/serdes.h"
@@ -29,6 +30,31 @@
 namespace py = pybind11;
 
 typedef std::map<std::string, std::vector<py::bytes>> nixl_py_notifs_t;
+
+struct nixlPyXferDoneState {
+    py::object callback;
+};
+
+void
+nixl_py_xfer_done_cb(nixl_status_t status, void *user_data) {
+    py::gil_scoped_acquire gil;
+    std::unique_ptr<nixlPyXferDoneState> state(
+        static_cast<nixlPyXferDoneState *>(user_data));
+
+    if (!state) {
+        return;
+    }
+
+    try {
+        state->callback(status);
+    } catch (py::error_already_set &e) {
+        e.restore();
+        PyErr_WriteUnraisable(state->callback.ptr());
+    } catch (const std::exception &e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        PyErr_WriteUnraisable(state->callback.ptr());
+    }
+}
 
 class nixlNotPostedError : public std::runtime_error {
 public:
@@ -718,6 +744,27 @@ PYBIND11_MODULE(_bindings, m) {
                 return ret;
             },
             py::call_guard<py::gil_scoped_release>())
+        .def(
+            "notifyXferDone",
+            [](nixlAgent &agent,
+               const std::vector<uintptr_t> &reqhs,
+               py::function callback) -> nixl_status_t {
+                std::vector<nixlXferReqH *> handles;
+                handles.reserve(reqhs.size());
+                for (uintptr_t reqh : reqhs) {
+                    handles.push_back((nixlXferReqH *)reqh);
+                }
+
+                auto *state = new nixlPyXferDoneState{py::object(callback)};
+                nixl_status_t ret = agent.notifyXferDone(handles, nixl_py_xfer_done_cb, state);
+                if (ret != NIXL_SUCCESS) {
+                    delete state;
+                }
+                throw_nixl_exception(ret);
+                return ret;
+            },
+            py::arg("reqhs"),
+            py::arg("callback"))
         .def(
             "getXferTelemetry",
             [](nixlAgent &agent, uintptr_t reqh) -> nixl_xfer_telem_t {

@@ -310,6 +310,11 @@ public:
     nixl_status_t
     getNotifs(notif_list_t &notif_list) override;
 
+    nixl_status_t
+    notifyXferDone(const std::vector<nixlBackendReqH *> &handles,
+                   nixl_xfer_done_cb_t cb,
+                   void *user_data = nullptr) override;
+
 protected:
     void
     appendNotif(std::string &&remote_name, std::string &&msg) override;
@@ -343,6 +348,11 @@ public:
 
     nixl_status_t
     getNotifs(notif_list_t &notif_list) override;
+
+    nixl_status_t
+    notifyXferDone(const std::vector<nixlBackendReqH *> &handles,
+                   nixl_xfer_done_cb_t cb,
+                   void *user_data = nullptr) override;
 
 protected:
     void

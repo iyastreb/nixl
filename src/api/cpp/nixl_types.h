@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <optional>
 #include <chrono>
+#include <functional>
 
 
 /*** Forward declarations ***/
@@ -109,6 +110,8 @@ using nixl_telemetry_plugin_t = std::string;
  *        preventing users to think it's a string and call c_str().
  */
 using nixl_blob_t = std::string;
+
+using nixl_xfer_done_cb_t = std::function<void(nixl_status_t, void *)>;
 
 /**
  * @brief A typedef for a std::vector<nixl_mem_t> to create nixl_mem_list_t objects.

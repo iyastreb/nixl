@@ -228,6 +228,13 @@ public:
         workerIds_.push_back(worker_id);
     }
 
+    virtual nixl_status_t
+    addWaitGroup(const std::vector<nixlBackendReqH *> &,
+                 nixl_xfer_done_cb_t,
+                 void * = nullptr) {
+        return NIXL_ERR_NOT_SUPPORTED;
+    }
+
     const std::vector<nixlUcxWorker *> &
     getWorkers() const {
         return workers_;
@@ -267,6 +274,11 @@ protected:
     virtual void
     run() = 0;
 
+    const nixlUcxEngine *
+    getEngine() const noexcept {
+        return engine_;
+    }
+
 private:
     const nixlUcxEngine *engine_;
     std::vector<nixlUcxWorker *> workers_;
@@ -302,9 +314,7 @@ public:
 
     void
     join() override {
-        const char signal = 'X';
-        int ret = write(controlPipe_[1], &signal, sizeof(signal));
-        if (ret < 0) NIXL_PERROR << "write to progress thread control pipe failed";
+        signalThread('X');
         nixlUcxThread::join();
     }
 
@@ -312,6 +322,35 @@ public:
     addWorker(nixlUcxWorker *worker, size_t worker_id) override {
         pollFds_[getWorkers().size()] = {worker->getEfd(), POLLIN, 0};
         nixlUcxThread::addWorker(worker, worker_id);
+    }
+
+    nixl_status_t
+    addWaitGroup(const std::vector<nixlBackendReqH *> &handles,
+                 nixl_xfer_done_cb_t cb,
+                 void *user_data = nullptr) override {
+        if (handles.empty() || !cb) {
+            return NIXL_ERR_INVALID_PARAM;
+        }
+
+        WaitGroup group;
+        group.handles.reserve(handles.size());
+        group.completed.resize(handles.size(), false);
+        group.cb = std::move(cb);
+        group.user_data = user_data;
+
+        for (auto handle : handles) {
+            if (!handle) {
+                return NIXL_ERR_INVALID_PARAM;
+            }
+            group.handles.push_back(static_cast<nixlUcxBackendReqH *>(handle));
+        }
+
+        {
+            const std::lock_guard lock(waitMutex_);
+            pendingWaitGroups_.push_back(std::move(group));
+        }
+        signalThread('W');
+        return NIXL_SUCCESS;
     }
 
 protected:
@@ -322,6 +361,8 @@ protected:
         bool timeout = true;
         bool pthr_stop = false;
         while (!pthr_stop) {
+            drainPendingWaitGroups();
+
             for (size_t i = 0; i < pollFds_.size() - 1; i++) {
                 if (!(pollFds_[i].revents & POLLIN) && !timeout) continue;
                 pollFds_[i].revents = 0;
@@ -331,6 +372,11 @@ protected:
                 } while (worker->arm() == NIXL_IN_PROG);
             }
             timeout = false;
+
+            auto readyWaitGroups = progressWaitGroups();
+            for (auto &group : readyWaitGroups) {
+                group.cb(group.status, group.user_data);
+            }
 
             int ret;
             while ((ret = poll(pollFds_.data(), pollFds_.size(), delay_.count())) < 0)
@@ -345,7 +391,9 @@ protected:
                 int ret = read(pollFds_.back().fd, &signal, sizeof(signal));
                 if (ret < 0) NIXL_PERROR << "read() on control pipe failed";
 
-                pthr_stop = true;
+                if (signal == 'X') {
+                    pthr_stop = true;
+                }
             }
         }
 
@@ -353,9 +401,75 @@ protected:
     }
 
 private:
+    struct WaitGroup {
+        std::vector<nixlUcxBackendReqH *> handles;
+        std::vector<bool> completed;
+        nixl_xfer_done_cb_t cb;
+        void *user_data = nullptr;
+        nixl_status_t status = NIXL_SUCCESS;
+    };
+
+    void
+    signalThread(char signal) {
+        int ret = write(controlPipe_[1], &signal, sizeof(signal));
+        if (ret < 0) NIXL_PERROR << "write to progress thread control pipe failed";
+    }
+
+    void
+    drainPendingWaitGroups() {
+        std::vector<WaitGroup> pending;
+        {
+            const std::lock_guard lock(waitMutex_);
+            pending.swap(pendingWaitGroups_);
+        }
+
+        for (auto &group : pending) {
+            activeWaitGroups_.push_back(std::move(group));
+        }
+    }
+
+    std::vector<WaitGroup>
+    progressWaitGroups() {
+        std::vector<WaitGroup> ready;
+
+        for (auto group_it = activeWaitGroups_.begin();
+             group_it != activeWaitGroups_.end();) {
+            bool all_done = true;
+
+            for (size_t i = 0; i < group_it->handles.size(); ++i) {
+                if (group_it->completed[i]) {
+                    continue;
+                }
+
+                const nixl_status_t status = getEngine()->checkXfer(group_it->handles[i]);
+                if (status == NIXL_IN_PROG) {
+                    all_done = false;
+                    continue;
+                }
+
+                group_it->completed[i] = true;
+                if ((status < 0) && (group_it->status == NIXL_SUCCESS)) {
+                    group_it->status = status;
+                }
+            }
+
+            if (all_done) {
+                ready.push_back(std::move(*group_it));
+                group_it = activeWaitGroups_.erase(group_it);
+            } else {
+                ++group_it;
+            }
+        }
+
+        return ready;
+    }
+
     std::chrono::milliseconds delay_;
     int controlPipe_[2];
     std::vector<pollfd> pollFds_;
+    std::mutex waitMutex_;
+    std::vector<WaitGroup> pendingWaitGroups_;
+    std::vector<WaitGroup> activeWaitGroups_;
 };
 
 nixlUcxThreadEngine::nixlUcxThreadEngine(const nixlBackendInitParams &init_params)
@@ -391,6 +505,13 @@ nixlUcxThreadEngine::getNotifs(notif_list_t &notif_list) {
     const std::lock_guard lock(notifMutex_);
     notifList_.swap(notif_list);
     return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxThreadEngine::notifyXferDone(const std::vector<nixlBackendReqH *> &handles,
+                                    nixl_xfer_done_cb_t cb,
+                                    void *user_data) {
+    return thread_->addWaitGroup(handles, std::move(cb), user_data);
 }
 
 /****************************************
@@ -773,6 +894,17 @@ nixlUcxThreadPoolEngine::getNotifs(notif_list_t &notif_list) {
     const std::lock_guard lock(notifMutex_);
     notifList_.swap(notif_list);
     return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxThreadPoolEngine::notifyXferDone(const std::vector<nixlBackendReqH *> &handles,
+                                        nixl_xfer_done_cb_t cb,
+                                        void *user_data) {
+    if (!sharedThread_) {
+        return NIXL_ERR_NOT_SUPPORTED;
+    }
+
+    return sharedThread_->addWaitGroup(handles, std::move(cb), user_data);
 }
 
 /****************************************

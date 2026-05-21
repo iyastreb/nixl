@@ -653,6 +653,22 @@ class nixl_agent:
         else:
             return "ERR"
 
+    def notify_xfer_done(self, handles, callback):
+        if isinstance(handles, nixl_xfer_handle):
+            handle_list = [handles]
+        else:
+            handle_list = list(handles)
+
+        raw_handles = [h._handle for h in handle_list]
+
+        def _callback(status, _handles=handle_list):
+            if status == nixlBind.NIXL_SUCCESS:
+                callback("DONE")
+            else:
+                callback("ERR")
+
+        self.agent.notifyXferDone(raw_handles, _callback)
+
     """
     @brief Get telemetry information of a transfer request.
            The output object has three time values fields in microseconds

@@ -299,6 +299,11 @@ class nixlAgent {
         nixl_status_t
         getXferStatus (nixlXferReqH* req_hndl) const;
 
+        nixl_status_t
+        notifyXferDone(const std::vector<nixlXferReqH*> &req_hndls,
+                       nixl_xfer_done_cb_t cb,
+                       void *user_data = nullptr) const;
+
 
         /**
          * @brief  Get the telemetry data associated with `req_hndl`.

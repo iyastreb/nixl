@@ -1156,6 +1156,70 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
 }
 
 nixl_status_t
+nixlAgent::notifyXferDone(const std::vector<nixlXferReqH*> &req_hndls,
+                          nixl_xfer_done_cb_t cb,
+                          void *user_data) const {
+    if (req_hndls.empty() || !cb) {
+        NIXL_ERROR_FUNC << "transfer request handles or callback are invalid";
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    std::vector<nixlBackendReqH *> backend_handles;
+    backend_handles.reserve(req_hndls.size());
+    nixlBackendEngine *engine = nullptr;
+    nixl_status_t aggregate_status = NIXL_SUCCESS;
+
+    {
+        NIXL_SHARED_LOCK_GUARD(data->lock);
+
+        for (const auto req_hndl : req_hndls) {
+            if (!req_hndl) {
+                NIXL_ERROR_FUNC << "transfer request handle is null";
+                return NIXL_ERR_INVALID_PARAM;
+            }
+
+            if (!req_hndl->engine || !req_hndl->backendHandle) {
+                NIXL_ERROR_FUNC << "transfer request handle is invalid";
+                return NIXL_ERR_INVALID_PARAM;
+            }
+
+            if (req_hndl->status == NIXL_ERR_NOT_POSTED) {
+                NIXL_ERROR_FUNC << "transfer request was not posted";
+                return NIXL_ERR_NOT_POSTED;
+            }
+
+            if (!engine) {
+                engine = req_hndl->engine;
+            } else if (engine != req_hndl->engine) {
+                NIXL_ERROR_FUNC << "notifyXferDone requires handles from the same backend";
+                return NIXL_ERR_MISMATCH;
+            }
+
+            if (req_hndl->status == NIXL_IN_PROG) {
+                backend_handles.push_back(req_hndl->backendHandle);
+            } else if ((req_hndl->status < 0) && (aggregate_status == NIXL_SUCCESS)) {
+                aggregate_status = req_hndl->status;
+            }
+        }
+    }
+
+    if (backend_handles.empty()) {
+        cb(aggregate_status, user_data);
+        return NIXL_SUCCESS;
+    }
+
+    if (aggregate_status != NIXL_SUCCESS) {
+        auto wrapped_cb = [cb = std::move(cb), user_data, aggregate_status](nixl_status_t,
+                                                                            void *) {
+            cb(aggregate_status, user_data);
+        };
+        return engine->notifyXferDone(backend_handles, std::move(wrapped_cb));
+    }
+
+    return engine->notifyXferDone(backend_handles, std::move(cb), user_data);
+}
+
+nixl_status_t
 nixlAgent::getXferTelemetry(const nixlXferReqH *req_hndl, nixl_xfer_telem_t &telemetry) const {
 
     if (!data->telemetryEnabled) {

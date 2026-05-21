@@ -171,6 +171,7 @@ public:
         requests_.resize(incomplete_reqs);
         if (requests_.empty()) {
             connections_.clear();
+            NIXL_WARN << "[PROFILE] data-done handle=" << this << " status=" << int(out_ret);
         }
         return out_ret;
     }
@@ -1089,6 +1090,10 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
     /* TODO: try to get from a pool first */
     handle = new nixlUcxBackendReqH(getWorker(worker_id).get(), worker_id);
 
+    NIXL_WARN << "[PROFILE] prepXfer handle=" << handle << " op=" << int(operation)
+              << " descs=" << local.descCount() << " remote=" << remote_agent
+              << " worker_id=" << worker_id;
+
     return NIXL_SUCCESS;
 }
 
@@ -1269,28 +1274,39 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
         return NIXL_ERR_INVALID_PARAM;
     }
 
+    NIXL_WARN << "[PROFILE] postXfer enter handle=" << int_handle << " op=" << int(operation)
+              << " descs=" << lcnt << " hasNotif=" << (opt_args && opt_args->hasNotif);
+
     // TODO: assert that handle is empty/completed, as we can't post request before completion
 
     ret = sendXferRange(operation, local, remote, remote_agent, handle, 0, lcnt);
     if (ret != NIXL_SUCCESS) {
+        NIXL_WARN << "[PROFILE] postXfer sendXferRange failed handle=" << int_handle
+                  << " status=" << int(ret);
         return ret;
     }
 
     ret = int_handle->status();
+    NIXL_WARN << "[PROFILE] postXfer status_after_send handle=" << int_handle
+              << " status=" << int(ret);
     if (opt_args && opt_args->hasNotif) {
         if (ret == NIXL_SUCCESS) {
+            NIXL_WARN << "[PROFILE] postXfer inline-AM submit handle=" << int_handle;
             nixlUcxReq req;
             const auto rmd = static_cast<nixlUcxPublicMetadata *>(remote[0].metadataP);
             ret = notifSendPriv(remote_agent,
                                 opt_args->notifMsg,
                                 rmd->conn->getEp(int_handle->getWorkerId()),
                                 &req);
+            NIXL_WARN << "[PROFILE] postXfer inline-AM submitted handle=" << int_handle
+                      << " status=" << int(ret);
             if (int_handle->append(ret, req, rmd->conn) != NIXL_SUCCESS) {
                 return ret;
             }
 
             ret = int_handle->status();
         } else if (ret == NIXL_IN_PROG) {
+            NIXL_WARN << "[PROFILE] postXfer deferred-AM stashed handle=" << int_handle;
             int_handle->notif.emplace(remote_agent, opt_args->notifMsg);
         }
     }
@@ -1310,6 +1326,9 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
     const nixlUcxBackendReqH::Notif notif(std::move(int_handle->notif).value());
     int_handle->notif.reset();
 
+    NIXL_WARN << "[PROFILE] checkXfer deferred-AM emit handle=" << int_handle
+              << " data_status=" << int(handle_status);
+
     if (__builtin_expect(handle_status != NIXL_SUCCESS, 0)) {
         return handle_status;
     }
@@ -1322,6 +1341,9 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
     nixlUcxReq req;
     const auto &ep = conn->getEp(int_handle->getWorkerId());
     const nixl_status_t status = notifSendPriv(notif.agent, notif.payload, ep, &req);
+
+    NIXL_WARN << "[PROFILE] checkXfer deferred-AM submitted handle=" << int_handle
+              << " status=" << int(status);
 
     if (int_handle->append(status, req, conn) != NIXL_SUCCESS) {
         return status;
@@ -1422,6 +1444,9 @@ nixlUcxEngine::notifAmCb(void *arg, const void *header,
     ser_des.importStr(ser_str);
     std::string remote_name = ser_des.getStr("name");
     std::string msg = ser_des.getStr("msg");
+
+    NIXL_WARN << "[PROFILE] AM received from=" << remote_name << " msg_size=" << msg.size()
+              << " payload_len=" << length;
 
     engine->appendNotif(std::move(remote_name), std::move(msg));
     return UCS_OK;

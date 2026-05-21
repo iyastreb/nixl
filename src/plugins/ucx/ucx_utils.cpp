@@ -200,6 +200,12 @@ using nixl_ucx_am_cb_ctx_ptr_t = std::unique_ptr<nixl_ucx_am_cb_ctx_t>;
 
 void
 nixlUcxEp::sendAmCallback(void *request, ucs_status_t status, void *user_data) {
+    NIXL_WARN << "[PROFILE] AM send async-cb request=" << request << " status=" << status << " ("
+              << ucs_status_string(status) << ")";
+    if (status != UCS_OK) {
+        NIXL_ERROR << "UCX AM send failed with status " << status << " ("
+                   << ucs_status_string(status) << ")";
+    }
     auto ctx = static_cast<nixl_ucx_am_cb_ctx_t *>(user_data);
     ctx->second(request, ctx->first);
     delete ctx;
@@ -235,6 +241,8 @@ nixlUcxEp::sendAm(nixl::ucx::am_cb_op_t msg_id,
     const ucs_status_ptr_t request =
         ucp_am_send_nbx(eph, unsigned(msg_id), hdr, hdr_len, buffer, len, &param);
     if (UCS_PTR_IS_PTR(request)) {
+        NIXL_WARN << "[PROFILE] AM send async ep=" << this << " msg_id=" << unsigned(msg_id)
+                  << " len=" << len << " request=" << request;
         ctx.release();
         if (req != nullptr) {
             *req = static_cast<nixlUcxReq>(request);
@@ -244,7 +252,11 @@ nixlUcxEp::sendAm(nixl::ucx::am_cb_op_t msg_id,
         deleter(nullptr, buffer);
     }
 
-    return nixl::ucx::ucsToNixlStatus(UCS_PTR_STATUS(request));
+    const ucs_status_t sync_status = UCS_PTR_STATUS(request);
+    NIXL_WARN << "[PROFILE] AM send sync-completion ep=" << this << " msg_id=" << unsigned(msg_id)
+              << " len=" << len << " status=" << sync_status << " ("
+              << ucs_status_string(sync_status) << ")";
+    return nixl::ucx::ucsToNixlStatus(sync_status);
 }
 
 /* ===========================================

@@ -19,6 +19,7 @@
 #include <chrono>
 #include <iostream>
 #include <numeric>
+#include <thread>
 
 #include "nixl.h"
 #include "serdes/serdes.h"
@@ -38,6 +39,16 @@ namespace {
 const std::vector<std::vector<std::string>> illegal_plugin_combinations = {
     {"GDS", "GDS_MT"},
 };
+
+constexpr auto wait_notifs_poll_interval = std::chrono::microseconds(100);
+
+size_t
+countNotifs(const nixl_notifs_t &notif_map) {
+    size_t count = 0;
+    for (const auto &elm : notif_map)
+        count += elm.second.size();
+    return count;
+}
 
 } // namespace
 
@@ -1243,9 +1254,6 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
         }
     }
 
-    // Doing best effort, if any backend errors out we return
-    // error but proceed with the rest. We can add metadata about
-    // the backend to the msg, but user could put it themselves.
     for (auto & eng: *backend_list) {
         bknd_notif_list.clear();
         ret = eng->getNotifs(bknd_notif_list);
@@ -1269,8 +1277,34 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
     if (extra_params && extra_params->backends.size() > 0)
         delete backend_list;
 
-    // If any backend had an error, it was already logged
     return bad_ret;
+}
+
+nixl_status_t
+nixlAgent::waitNotifs(nixl_notifs_t &notif_map,
+                      uint64_t timeout_us,
+                      const nixl_opt_args_t* extra_params) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
+
+    while (true) {
+        const size_t old_count = countNotifs(notif_map);
+        nixl_status_t ret = getNotifs(notif_map, extra_params);
+        if (ret < 0)
+            return ret;
+        if (countNotifs(notif_map) > old_count)
+            return NIXL_SUCCESS;
+        if (timeout_us == 0)
+            return NIXL_IN_PROG;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+            return NIXL_IN_PROG;
+
+        const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+        const auto sleep_duration =
+            remaining < wait_notifs_poll_interval ? remaining : wait_notifs_poll_interval;
+        std::this_thread::sleep_for(sleep_duration);
+    }
 }
 
 nixl_status_t

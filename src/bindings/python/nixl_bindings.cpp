@@ -772,6 +772,35 @@ PYBIND11_MODULE(_bindings, m) {
             py::arg("notif_map"),
             py::arg("backends") = std::vector<uintptr_t>({}))
         .def(
+            "waitNotifs",
+            [](nixlAgent &agent,
+               nixl_py_notifs_t &notif_map,
+               uint64_t timeout_us,
+               const std::vector<uintptr_t> &backends) -> nixl_py_notifs_t {
+                nixl_notifs_t new_notifs;
+                nixl_opt_args_t extra_params;
+                nixl_status_t ret;
+
+                {
+                    py::gil_scoped_release release;
+                    for (uintptr_t backend : backends)
+                        extra_params.backends.push_back((nixlBackendH *)backend);
+
+                    ret = agent.waitNotifs(new_notifs, timeout_us, &extra_params);
+                }
+
+                throw_nixl_exception(ret);
+
+                for (const auto &pair : new_notifs) {
+                    for (const auto &str : pair.second)
+                        notif_map[pair.first].push_back(py::bytes(str));
+                }
+                return notif_map;
+            },
+            py::arg("notif_map"),
+            py::arg("timeout_us"),
+            py::arg("backends") = std::vector<uintptr_t>({}))
+        .def(
             "genNotif",
             [](nixlAgent &agent,
                const std::string &remote_agent,

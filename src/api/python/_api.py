@@ -719,6 +719,17 @@ class nixl_agent:
             handle_list.append(self.backends[backend_string])
         return self.agent.getNotifs({}, handle_list)
 
+    def wait_new_notifs(
+        self, timeout_us: int, backends: list[str] = []
+    ) -> dict[str, list[bytes]]:
+        if timeout_us < 0:
+            raise ValueError("timeout_us must be non-negative")
+
+        handle_list = []
+        for backend_string in backends:
+            handle_list.append(self.backends[backend_string])
+        return self.agent.waitNotifs({}, int(timeout_us), handle_list)
+
     """
     @brief Update notifications in a map
             Same as get_new_notifs, but returns all unhandled notifications in agent.

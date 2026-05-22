@@ -406,6 +406,11 @@ class nixlAgent {
         getNotifs (nixl_notifs_t &notif_map,
                    const nixl_opt_args_t* extra_params = nullptr);
 
+        nixl_status_t
+        waitNotifs (nixl_notifs_t &notif_map,
+                    uint64_t timeout_us,
+                    const nixl_opt_args_t* extra_params = nullptr);
+
         /**
          * @brief  Generate a notification, not bound to a transfer, e.g., for control.
          *         Metadata of remote agent should be available before this call. The

@@ -635,8 +635,8 @@ PYBIND11_MODULE(_bindings, m) {
                 const auto local_span = indices_to_span(local_indices, local_indices_vec);
                 const auto remote_span = indices_to_span(remote_indices, remote_indices_vec);
 
-                nixlDlistH *local_dlist = reinterpret_cast<nixlDlistH *>(local_side);
-                nixlDlistH *remote_dlist = reinterpret_cast<nixlDlistH *>(remote_side);
+                auto local_dlist = reinterpret_cast<nixlDlistH *>(local_side);
+                auto remote_dlist = reinterpret_cast<nixlDlistH *>(remote_side);
                 throw_nixl_exception(agent.makeXferReq(operation,
                                                        *local_dlist,
                                                        local_span,

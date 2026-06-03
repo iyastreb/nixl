@@ -637,13 +637,17 @@ PYBIND11_MODULE(_bindings, m) {
 
                 auto local_dlist = reinterpret_cast<nixlDlistH *>(local_side);
                 auto remote_dlist = reinterpret_cast<nixlDlistH *>(remote_side);
-                throw_nixl_exception(agent.makeXferReq(operation,
-                                                       *local_dlist,
-                                                       local_span,
-                                                       *remote_dlist,
-                                                       remote_span,
-                                                       handle,
-                                                       &extra_params));
+
+                {
+                    py::gil_scoped_release release;
+                    throw_nixl_exception(agent.makeXferReq(operation,
+                                                           *local_dlist,
+                                                           local_span,
+                                                           *remote_dlist,
+                                                           remote_span,
+                                                           handle,
+                                                           &extra_params));
+                }
 
                 return (uintptr_t)handle;
             },

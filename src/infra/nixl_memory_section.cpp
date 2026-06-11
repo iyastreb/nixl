@@ -67,19 +67,17 @@ nixl_status_t nixlMemSection::populate (const nixl_xfer_dlist_t &query,
     }
 
     const nixlSecDescList &base = it->second;
-    resp.resize(query.descCount());
+    const int size = base.descCount();
 
-    int size = base.descCount();
-    int s_index = 0;
+    resp.clear();
+    resp.reserve(query.descCount());
 
     // Use logN search for the first element, instead of linear search
-    s_index = base.getCoveringIndex(query[0]);
+    int s_index = base.getCoveringIndex(query[0]);
     if (s_index < 0) {
-        resp.clear();
         return NIXL_ERR_UNKNOWN;
     }
-    static_cast<nixlBasicDesc &>(resp[0]) = query[0];
-    resp[0].metadataP = base[s_index].metadataP;
+    resp.emplace(query[0].addr, query[0].len, query[0].devId, base[s_index].metadataP);
 
     // Walk forward for non-decreasing elements; logN search on temporal disorder
     for (int i = 1; i < query.descCount(); ++i) {
@@ -99,8 +97,7 @@ nixl_status_t nixlMemSection::populate (const nixl_xfer_dlist_t &query,
             }
         }
 
-        static_cast<nixlBasicDesc &>(resp[i]) = query[i];
-        resp[i].metadataP = base[s_index].metadataP;
+        resp.emplace(query[i].addr, query[i].len, query[i].devId, base[s_index].metadataP);
     }
     return NIXL_SUCCESS;
 }

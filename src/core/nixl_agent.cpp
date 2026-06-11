@@ -58,10 +58,13 @@ nixlXferReqH::nixlXferReqH(const std::string &remote_agent,
                            const nixl_mem_t local_type,
                            const nixl_mem_t remote_type,
                            const size_t desc_count)
-    : initiatorDescs(local_type, desc_count),
-      targetDescs(remote_type, desc_count),
+    : initiatorDescs(local_type),
+      targetDescs(remote_type),
       remoteAgent(remote_agent),
-      backendOp(backend_op) {}
+      backendOp(backend_op) {
+    initiatorDescs.reserve(desc_count);
+    targetDescs.reserve(desc_count);
+}
 
 void
 nixlXferReqH::updateRequestStats(nixlTelemetry *telemetry_pub,
@@ -747,7 +750,6 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
                                                  remote_descs.getType(),
                                                  desc_count);
 
-    size_t merged_size = 0;
     size_t total_bytes = 0;
     const bool skip_desc_merge = extra_params && extra_params->skipDescMerge;
     const size_t local_size = local_descs.flatSize();
@@ -802,15 +804,13 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
             }
         }
 
-        handle->initiatorDescs[merged_size] = local_stride.getMetaDesc(local_idx, seq_count);
-        handle->targetDescs[merged_size] = remote_stride.getMetaDesc(remote_idx, seq_count);
-        ++merged_size;
+        handle->initiatorDescs.emplace(local_stride.getMetaDesc(local_idx, seq_count));
+        handle->targetDescs.emplace(remote_stride.getMetaDesc(remote_idx, seq_count));
         total_bytes += local_stride.len * seq_count;
     }
 
-    NIXL_DEBUG << "merged " << desc_count << " indices into " << merged_size << " descriptors";
-    handle->initiatorDescs.resize(merged_size);
-    handle->targetDescs.resize(merged_size);
+    NIXL_DEBUG << "merged " << desc_count << " indices into " << handle->initiatorDescs.descCount()
+               << " descriptors";
 
     handle->engine = backend;
     handle->notifMsg = opt_args.notifMsg;

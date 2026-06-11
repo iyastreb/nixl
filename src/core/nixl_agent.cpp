@@ -616,13 +616,15 @@ nixlAgent::prepXferDlist (const std::string &agent_name,
     nixlDlistH::descs_t dlists;
 
     for (const auto &backend : *backend_set) {
+        int stride_count;
         nixl_stride_dlist_t dlist(descs.getType());
         if (section.populate(descs, backend, dlist) == NIXL_SUCCESS) {
+            stride_count = dlist.descCount();
             dlists.try_emplace(backend, std::make_unique<nixl_stride_dlist_t>(std::move(dlist)));
         }
 
         NIXL_DEBUG << "backend " << backend->getType() << ": prepared " << descs.descCount()
-                   << " descriptors into " << dlist.descCount() << " strides";
+                   << " descriptors into " << stride_count << " strides";
     }
 
     if (extra_params && (extra_params->backends.size() > 0)) {

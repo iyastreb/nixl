@@ -684,10 +684,6 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
         return NIXL_ERR_INVALID_PARAM;
     }
 
-    if (extra_params && extra_params->skipDescMerge) {
-        NIXL_DEBUG << "skipDescMerge is deprecated and will be removed in a future release";
-    }
-
     if (extra_params && extra_params->backends.size() > 0) {
         for (auto & elm : extra_params->backends) {
             if ((local_side->descs.count(elm->engine) > 0) &&
@@ -753,6 +749,7 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
 
     size_t merged_size = 0;
     size_t total_bytes = 0;
+    const bool skip_desc_merge = extra_params && extra_params->skipDescMerge;
     const size_t local_size = local_descs.flatSize();
     const size_t remote_size = remote_descs.flatSize();
     // Ceiling division so that find()'s first probe (flat_idx / run_size) can never exceed
@@ -789,16 +786,17 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
 
         seq_count = 1;
         // Merge only dense strides
-        if (local_stride.stride == local_stride.len &&
-            local_stride.stride == remote_stride.stride) {
+        if (!skip_desc_merge && local_stride.stride == local_stride.len &&
+            local_stride.stride == remote_stride.stride) [[likely]] {
             const size_t cap =
                 std::min(std::min(local_stride.start_idx + local_stride.count - local_idx,
                                   remote_stride.start_idx + remote_stride.count - remote_idx),
                          static_cast<size_t>(desc_count) - i);
 
-            while (seq_count < cap &&
-                   static_cast<size_t>(local_indices[i + seq_count]) == local_idx + seq_count &&
-                   static_cast<size_t>(remote_indices[i + seq_count]) == remote_idx + seq_count) {
+            auto local_indices_ptr = reinterpret_cast<const unsigned *>(&local_indices[i]);
+            auto remote_indices_ptr = reinterpret_cast<const unsigned *>(&remote_indices[i]);
+            while (seq_count < cap && local_indices_ptr[seq_count] == local_idx + seq_count &&
+                   remote_indices_ptr[seq_count] == remote_idx + seq_count) {
                 ++seq_count;
             }
         }

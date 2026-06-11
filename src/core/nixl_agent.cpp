@@ -804,9 +804,10 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
             }
         }
 
-        handle->initiatorDescs.emplace(local_stride.getMetaDesc(local_idx, seq_count));
+        const auto &local_desc =
+            handle->initiatorDescs.emplace(local_stride.getMetaDesc(local_idx, seq_count));
         handle->targetDescs.emplace(remote_stride.getMetaDesc(remote_idx, seq_count));
-        total_bytes += local_stride.len * seq_count;
+        total_bytes += local_desc.len;
     }
 
     NIXL_DEBUG << "merged " << desc_count << " indices into " << handle->initiatorDescs.descCount()

@@ -405,14 +405,15 @@ public:
     addDesc(const T &desc);
 
     /**
-     * @brief     Emplace a new descriptor into the descriptor list
+     * @brief Emplace a new descriptor into the descriptor list
      *
      * @param args Arguments to construct the descriptor
+     * @return     Reference to the newly emplaced descriptor
      */
     template<class... Args>
-    inline void
+    inline T &
     emplace(Args &&...args) {
-        descs.emplace_back(std::forward<Args>(args)...);
+        return descs.emplace_back(std::forward<Args>(args)...);
     }
 
     /**

@@ -90,6 +90,10 @@ public:
     void
     remDescs(std::vector<size_t> indices, order ord = order::UNSORTED);
 
+    template<class... Args>
+    nixlSectionDesc &
+    emplace(Args &&...args) = delete;
+
     // Shadow the parent's non-const operator[] to return a const ref,
     // this prevents mutation of descriptor fields after insertion
     const nixlSectionDesc &

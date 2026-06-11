@@ -775,6 +775,7 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
             return NIXL_ERR_INVALID_PARAM;
         }
 
+        // Keep by value to avoid reloads and keep in registers
         const nixlStrideDesc local_stride = local_descs.find(local_idx, local_run_size);
         const nixlStrideDesc remote_stride = remote_descs.find(remote_idx, remote_run_size);
 
@@ -793,8 +794,8 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
                                   remote_stride.start_idx + remote_stride.count - remote_idx),
                          static_cast<size_t>(desc_count) - i);
 
-            auto local_indices_ptr = reinterpret_cast<const unsigned *>(&local_indices[i]);
-            auto remote_indices_ptr = reinterpret_cast<const unsigned *>(&remote_indices[i]);
+            auto *local_indices_ptr = reinterpret_cast<const unsigned *>(&local_indices[i]);
+            auto *remote_indices_ptr = reinterpret_cast<const unsigned *>(&remote_indices[i]);
             while (seq_count < cap && local_indices_ptr[seq_count] == local_idx + seq_count &&
                    remote_indices_ptr[seq_count] == remote_idx + seq_count) {
                 ++seq_count;

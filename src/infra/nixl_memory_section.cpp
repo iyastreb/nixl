@@ -106,6 +106,86 @@ nixl_status_t nixlMemSection::populate (const nixl_xfer_dlist_t &query,
 }
 
 nixl_status_t
+nixlMemSection::populate(const nixl_xfer_dlist_t &query,
+                         nixlBackendEngine *backend,
+                         nixl_stride_dlist_t &resp) const {
+
+    if ((query.getType() != resp.getType()) || (query.isEmpty())) {
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    const section_key_t sec_key(query.getType(), backend);
+    const auto it = sectionMap.find(sec_key);
+    if (it == sectionMap.end()) {
+        return NIXL_ERR_NOT_FOUND;
+    }
+
+    const nixlSecDescList &base = it->second;
+    const int size = base.descCount();
+    const int n = query.descCount();
+
+    resp.clear();
+
+    int s_index = base.getCoveringIndex(query[0]);
+    if (s_index < 0) {
+        return NIXL_ERR_UNKNOWN;
+    }
+
+    nixlStrideDesc current(
+        query[0].addr, query[0].len, query[0].devId, base[s_index].metadataP, query[0].len, 1);
+    uintptr_t prev_addr = query[0].addr;
+
+    for (int i = 1; i < n; ++i) {
+        const nixlBasicDesc &it = query[i];
+
+        if (!base[s_index].covers(it)) [[unlikely]] {
+            if (it < query[i - 1]) {
+                s_index = base.getCoveringIndex(it);
+                if (s_index < 0) {
+                    resp.clear();
+                    return NIXL_ERR_UNKNOWN;
+                }
+            } else {
+                while (s_index < size && !base[s_index].covers(it)) {
+                    ++s_index;
+                }
+                if (s_index == size) {
+                    resp.clear();
+                    return NIXL_ERR_UNKNOWN;
+                }
+            }
+        }
+
+        nixlBackendMD *const meta = base[s_index].metadataP;
+
+        bool extends;
+        if ((it.len != current.len) || (it.devId != current.devId) || (meta != current.metadataP)) {
+            extends = false;
+        } else if (current.count == 1) {
+            extends = (it.addr > prev_addr);
+            if (extends) {
+                current.stride = it.addr - prev_addr;
+            }
+        } else {
+            extends = ((it.addr - prev_addr) == current.stride);
+        }
+
+        if (extends) {
+            ++current.count;
+            prev_addr = it.addr;
+        } else {
+            resp.addDesc(current);
+            current = nixlStrideDesc(it.addr, it.len, it.devId, meta, it.len, 1);
+            current.start_idx = static_cast<size_t>(i);
+            prev_addr = it.addr;
+        }
+    }
+
+    resp.addDesc(current);
+    return NIXL_SUCCESS;
+}
+
+nixl_status_t
 nixlMemSection::addElement(const nixlRemoteDesc &query,
                            nixlBackendEngine *backend,
                            nixl_remote_meta_dlist_t &resp) const {

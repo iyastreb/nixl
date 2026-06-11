@@ -59,6 +59,13 @@ public:
     void
     updateRequestStats(nixlTelemetry *telemetry, nixl_telemetry_stat_status_t stat_status);
 
+    void
+    reset(const std::string &remote_agent,
+          const nixl_xfer_op_t backend_op,
+          const nixl_mem_t local_type,
+          const nixl_mem_t remote_type,
+          const size_t desc_count);
+
     friend class nixlAgent;
 
 private:
@@ -68,11 +75,11 @@ private:
     nixl_meta_dlist_t initiatorDescs;
     nixl_meta_dlist_t targetDescs;
 
-    const std::string remoteAgent;
+    std::string remoteAgent;
     nixl_blob_t notifMsg;
     bool hasNotif = false;
 
-    const nixl_xfer_op_t backendOp;
+    nixl_xfer_op_t backendOp;
     nixl_status_t status = NIXL_ERR_NOT_POSTED;
 
     nixl_xfer_telem_t telemetry;

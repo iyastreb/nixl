@@ -19,8 +19,10 @@
 
 #include "mem_section.h"
 #include "telemetry.h"
+#include "transfer_request.h"
 #include "stream/metadata_stream.h"
 #include "sync.h"
+#include "common/nixl_memory_pool.h"
 
 #include <atomic>
 #include <memory>
@@ -70,6 +72,10 @@ class nixlAgentData {
         const bool needsCommThread_;
         nixlLock        lock;
         std::atomic<bool> efaWarningChecked = false;
+
+        // Pool of recycled transfer request handles, to avoid a heap allocation
+        // (and the descriptor-vector allocations they carry) on every transfer.
+        nixlMemoryPool<nixlXferReqH> xferReqPool;
 
         // some handle that can be used to instantiate an object from the lib
         std::map<std::string, void*> backendLibs;

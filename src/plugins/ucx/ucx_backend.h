@@ -33,6 +33,7 @@
 
 #include "backend/backend_engine.h"
 #include "common/nixl_time.h"
+#include "common/nixl_memory_pool.h"
 
 #include "mem_list.h"
 #include "rkey.h"
@@ -91,6 +92,8 @@ public:
 private:
     const std::vector<nixl::ucx::rkey> rkeys_;
 };
+
+class nixlUcxBackendReqH;
 
 class nixlUcxEngine : public nixlBackendEngine {
 public:
@@ -295,6 +298,8 @@ private:
 
     // Map of agent name to saved nixlUcxConnection info
     std::unordered_map<std::string, ucx_connection_ptr_t> remoteConnMap;
+
+    mutable nixlMemoryPool<nixlUcxBackendReqH> reqHPool_;
 };
 
 class nixlUcxThread;

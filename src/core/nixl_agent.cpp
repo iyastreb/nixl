@@ -59,11 +59,30 @@ nixlXferReqH::nixlXferReqH(const std::string &remote_agent,
                            const nixl_mem_t remote_type,
                            const size_t desc_count)
     : initiatorDescs(local_type),
-      targetDescs(remote_type),
-      remoteAgent(remote_agent),
-      backendOp(backend_op) {
+      targetDescs(remote_type) {
+    reset(remote_agent, backend_op, local_type, remote_type, desc_count);
+}
+
+void
+nixlXferReqH::reset(const std::string &remote_agent,
+                    const nixl_xfer_op_t backend_op,
+                    const nixl_mem_t local_type,
+                    const nixl_mem_t remote_type,
+                    const size_t desc_count) {
+    engine = nullptr;
+    backendHandle = nullptr;
+    initiatorDescs.setType(local_type);
+    initiatorDescs.clear();
     initiatorDescs.reserve(desc_count);
+    targetDescs.setType(remote_type);
+    targetDescs.clear();
     targetDescs.reserve(desc_count);
+    remoteAgent = remote_agent;
+    notifMsg.clear();
+    hasNotif = false;
+    backendOp = backend_op;
+    status = NIXL_ERR_NOT_POSTED;
+    telemetry = nixl_xfer_telem_t{};
 }
 
 void
@@ -748,13 +767,11 @@ nixlAgent::makeXferReq (const nixl_xfer_op_t &operation,
     const nixl_stride_dlist_t &local_descs = *local_side->descs.at(backend);
     const nixl_stride_dlist_t &remote_descs = *remote_side->descs.at(backend);
 
-    // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
-
-    auto handle = std::make_unique<nixlXferReqH>(remote_side->remoteAgent,
-                                                 operation,
-                                                 local_descs.getType(),
-                                                 remote_descs.getType(),
-                                                 desc_count);
+    auto handle = data->xferReqPool.get(remote_side->remoteAgent,
+                                        operation,
+                                        local_descs.getType(),
+                                        remote_descs.getType(),
+                                        desc_count);
 
     size_t total_bytes = 0;
     const bool skip_desc_merge = extra_params && extra_params->skipDescMerge;
@@ -911,11 +928,11 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     // TODO: merge descriptors back to back in memory (like makeXferReq).
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
-    auto handle = std::make_unique<nixlXferReqH>(remote_agent,
-                                                 operation,
-                                                 local_descs.getType(),
-                                                 remote_descs.getType(),
-                                                 local_descs.descCount());
+    auto handle = data->xferReqPool.get(remote_agent,
+                                        operation,
+                                        local_descs.getType(),
+                                        remote_descs.getType(),
+                                        local_descs.descCount());
 
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
@@ -1222,7 +1239,14 @@ nixlAgent::releaseXferReq(nixlXferReqH *req_hndl) const {
             req_hndl->backendHandle = nullptr;
         }
     }
-    delete req_hndl;
+
+    if ((req_hndl->backendHandle != nullptr) && (req_hndl->engine != nullptr)) {
+        req_hndl->engine->releaseReqH(req_hndl->backendHandle);
+        req_hndl->backendHandle = nullptr;
+    }
+    req_hndl->engine = nullptr;
+
+    data->xferReqPool.put(std::unique_ptr<nixlXferReqH>(req_hndl));
     return NIXL_SUCCESS;
 }
 

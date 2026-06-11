@@ -81,6 +81,15 @@ public:
           workerId_(worker_id) {}
 
     void
+    reset(nixlUcxWorker *worker, size_t worker_id) {
+        requests_.clear();
+        connections_.clear();
+        notif.reset();
+        worker_ = worker;
+        workerId_ = worker_id;
+    }
+
+    void
     reserve(size_t size) {
         requests_.reserve(size);
         NIXL_ASSERT(connections_.empty());
@@ -1088,8 +1097,7 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
     }
 
     const size_t worker_id = getWorkerId(opt_args);
-    /* TODO: try to get from a pool first */
-    handle = new nixlUcxBackendReqH(getWorker(worker_id).get(), worker_id);
+    handle = reqHPool_.get(getWorker(worker_id).get(), worker_id).release();
 
     return NIXL_SUCCESS;
 }
@@ -1337,8 +1345,11 @@ nixl_status_t nixlUcxEngine::releaseReqH(nixlBackendReqH* handle) const
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
     int_handle->release();
 
-    /* TODO: return to a pool instead. */
-    delete int_handle;
+    if (int_handle->isComposite()) [[unlikely]] {
+        delete int_handle;
+    } else {
+        reqHPool_.put(std::unique_ptr<nixlUcxBackendReqH>(int_handle));
+    }
 
     return NIXL_SUCCESS;
 }

@@ -23,8 +23,14 @@
 #include <tuple>
 #include <iostream>
 
+#include <cerrno>
+#include <chrono>
+#include <poll.h>
+#include <system_error>
+
 #include "nixl.h"
 #include "serdes/serdes.h"
+#include "transfer_request.h"
 
 namespace py = pybind11;
 
@@ -698,11 +704,15 @@ PYBIND11_MODULE(_bindings, m) {
             py::arg("req_handle"))
         .def(
             "postXferReq",
-            [](nixlAgent &agent, uintptr_t reqh, std::string notif_msg) -> nixl_status_t {
+            [](nixlAgent &agent, uintptr_t reqh, std::string notif_msg, bool async_completion)
+                -> nixl_status_t {
                 nixl_opt_args_t extra_params;
                 nixl_status_t ret;
-                if (notif_msg.size() > 0) {
-                    extra_params.notif = notif_msg;
+                if (notif_msg.size() > 0 || async_completion) {
+                    if (notif_msg.size() > 0) {
+                        extra_params.notif = notif_msg;
+                    }
+                    extra_params.asyncCompletion = async_completion;
                     ret = agent.postXferReq((nixlXferReqH *)reqh, &extra_params);
                 } else {
                     ret = agent.postXferReq((nixlXferReqH *)reqh);
@@ -712,6 +722,7 @@ PYBIND11_MODULE(_bindings, m) {
             },
             py::arg("reqh"),
             py::arg("notif_msg") = std::string(""),
+            py::arg("async_completion") = false,
             py::call_guard<py::gil_scoped_release>())
         .def(
             "getXferStatus",
@@ -720,6 +731,66 @@ PYBIND11_MODULE(_bindings, m) {
                 throw_nixl_exception(ret);
                 return ret;
             },
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "hasXferCompletion",
+            [](nixlAgent &, uintptr_t reqh) {
+                return ((nixlXferReqH *)reqh)->getEventFd() >= 0;
+            })
+        .def(
+            "waitXferAnyAsync",
+            [](nixlAgent &, const std::vector<uintptr_t> &reqhs, int timeout_ms) {
+                if (reqhs.empty()) {
+                    return;
+                }
+                std::vector<pollfd> poll_fds;
+                poll_fds.reserve(reqhs.size());
+                for (uintptr_t reqh : reqhs) {
+                    poll_fds.push_back({((nixlXferReqH *)reqh)->getEventFd(), POLLIN, 0});
+                }
+                const bool have_deadline = timeout_ms >= 0;
+                const auto deadline =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+                while (poll(poll_fds.data(), poll_fds.size(), timeout_ms) < 0) {
+                    const int error = errno;
+                    if (error != EINTR) {
+                        throw std::system_error(error, std::generic_category(), "poll");
+                    }
+                    if (have_deadline) {
+                        const auto remaining = deadline - std::chrono::steady_clock::now();
+                        if (remaining <= std::chrono::steady_clock::duration::zero()) {
+                            return;
+                        }
+                        timeout_ms = static_cast<int>(
+                            std::chrono::ceil<std::chrono::milliseconds>(remaining).count());
+                    }
+                }
+            },
+            py::arg("reqhs"),
+            py::arg("timeout_ms") = -1,
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "waitXferAnyBusy",
+            [](nixlAgent &agent, const std::vector<uintptr_t> &reqhs, int timeout_ms) {
+                if (reqhs.empty()) {
+                    return;
+                }
+                const bool have_deadline = timeout_ms >= 0;
+                const auto deadline =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+                while (true) {
+                    for (uintptr_t reqh : reqhs) {
+                        if (agent.getXferStatus((nixlXferReqH *)reqh) != NIXL_IN_PROG) {
+                            return;
+                        }
+                    }
+                    if (have_deadline && std::chrono::steady_clock::now() >= deadline) {
+                        return;
+                    }
+                }
+            },
+            py::arg("reqhs"),
+            py::arg("timeout_ms") = -1,
             py::call_guard<py::gil_scoped_release>())
         .def(
             "getXferTelemetry",

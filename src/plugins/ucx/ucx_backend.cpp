@@ -271,6 +271,11 @@ protected:
     virtual void
     run() = 0;
 
+    const nixlUcxEngine *
+    getEngine() const noexcept {
+        return engine_;
+    }
+
 private:
     const nixlUcxEngine *engine_;
     std::vector<nixlUcxWorker *> workers_;
@@ -318,6 +323,24 @@ public:
         nixlUcxThread::addWorker(worker, worker_id);
     }
 
+    void
+    addHandle(nixlUcxBackendReqH *handle) {
+        const std::lock_guard<std::mutex> lock(pendingMutex_);
+        pending_.push_back(handle);
+    }
+
+    void
+    removeHandle(nixlUcxBackendReqH *handle) {
+        {
+            const std::lock_guard<std::mutex> lock(pendingMutex_);
+            if (std::erase(pending_, handle) > 0) {
+                return;
+            }
+        }
+        const std::lock_guard<std::mutex> lock(activeMutex_);
+        std::erase(active_, handle);
+    }
+
 protected:
     void
     run() override {
@@ -335,6 +358,8 @@ protected:
                 } while (worker->arm() == NIXL_IN_PROG);
             }
             timeout = false;
+
+            progressHandles();
 
             int ret;
             while ((ret = poll(pollFds_.data(), pollFds_.size(), delay_.count())) < 0)
@@ -357,9 +382,35 @@ protected:
     }
 
 private:
+    void
+    progressHandles() {
+        const std::lock_guard<std::mutex> lock(activeMutex_);
+        {
+            const std::lock_guard<std::mutex> pending_lock(pendingMutex_);
+            active_.insert(active_.end(), pending_.begin(), pending_.end());
+            pending_.clear();
+        }
+
+        for (auto it = active_.begin(); it != active_.end();) {
+            nixlUcxBackendReqH *handle = *it;
+            const nixl_status_t status = getEngine()->checkXfer(handle);
+            if (status == NIXL_IN_PROG) {
+                ++it;
+                continue;
+            }
+            NIXL_ASSERT(handle->getCompletion() != nullptr);
+            handle->getCompletion()->setStatus(status);
+            it = active_.erase(it);
+        }
+    }
+
     std::chrono::milliseconds delay_;
     int controlPipe_[2];
     std::vector<pollfd> pollFds_;
+    std::mutex pendingMutex_;
+    std::mutex activeMutex_;
+    std::vector<nixlUcxBackendReqH *> pending_;
+    std::vector<nixlUcxBackendReqH *> active_;
 };
 
 nixlUcxThreadEngine::nixlUcxThreadEngine(const nixlBackendInitParams &init_params,
@@ -406,6 +457,37 @@ nixlUcxThreadEngine::getNotifs(notif_list_t &notif_list) {
     const std::lock_guard lock(notifMutex_);
     notifList_.swap(notif_list);
     return NIXL_SUCCESS;
+}
+
+nixl_status_t
+nixlUcxThreadEngine::postXfer(const nixl_xfer_op_t &operation,
+                              const nixl_meta_dlist_t &local,
+                              const nixl_meta_dlist_t &remote,
+                              const std::string &remote_agent,
+                              nixlBackendReqH *&handle,
+                              const nixl_opt_b_args_t *opt_args) const {
+    const nixl_status_t ret =
+        nixlUcxEngine::postXfer(operation, local, remote, remote_agent, handle, opt_args);
+
+    if (opt_args && opt_args->asyncCompletion && supportsCompletion() && ret == NIXL_IN_PROG) {
+        const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
+        const nixl_status_t completion_ret = int_handle->initCompletion();
+        if (completion_ret != NIXL_SUCCESS) {
+            return completion_ret;
+        }
+        static_cast<nixlUcxSharedThread *>(thread_.get())->addHandle(int_handle);
+    }
+
+    return ret;
+}
+
+nixl_status_t
+nixlUcxThreadEngine::releaseReqH(nixlBackendReqH *handle) const {
+    const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
+    if (int_handle->getCompletion() != nullptr) {
+        static_cast<nixlUcxSharedThread *>(thread_.get())->removeHandle(int_handle);
+    }
+    return nixlUcxEngine::releaseReqH(handle);
 }
 
 /****************************************

@@ -1194,6 +1194,10 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         return NIXL_ERR_BACKEND;
     }
 
+    if (extra_params && extra_params->asyncCompletion) {
+        opt_args.asyncCompletion = true;
+    }
+
     // If status is not NIXL_IN_PROG we can repost,
     req_hndl->status = req_hndl->engine->postXfer(req_hndl->backendOp,
                                                   req_hndl->initiatorDescs,
@@ -1246,7 +1250,12 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
             return NIXL_ERR_NOT_FOUND;
         }
 
-        req_hndl->status = req_hndl->engine->checkXfer(req_hndl->backendHandle);
+        const nixlCompletion *completion = req_hndl->backendHandle->getCompletion();
+        if (completion != nullptr) {
+            req_hndl->status = static_cast<nixl_status_t>(completion->getStatus().status);
+        } else {
+            req_hndl->status = req_hndl->engine->checkXfer(req_hndl->backendHandle);
+        }
         if (req_hndl->status < 0) {
             if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {
                 read_lock.unlock();

@@ -111,6 +111,13 @@ class nixlBackendEngine {
         // pure virtual, and return errors, as parent shouldn't call if supportsNotif is false.
         virtual bool supportsNotif() const = 0;
 
+        // Determines if a backend can arm a request with a nixlCompletion so it
+        // can be waited on via eventfd or polled non-destructively.
+        virtual bool
+        supportsCompletion() const {
+            return false;
+        }
+
         virtual nixl_mem_list_t getSupportedMems() const = 0;  // TODO: Return by const-reference and mark noexcept?
 
 

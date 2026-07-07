@@ -17,8 +17,15 @@
 #ifndef __BACKEND_AUX_H_
 #define __BACKEND_AUX_H_
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
+
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include "common/nixl_log.h"
 #include "nixl_types.h"
 #include "nixl_descriptors.h"
@@ -34,6 +41,7 @@ struct nixlBackendOptionalArgs {
     nixl_blob_t notifMsg;
     bool        hasNotif = false;
     nixl_blob_t customParam;
+    bool asyncCompletion = false;
 };
 
 using nixl_opt_b_args_t = nixlBackendOptionalArgs;
@@ -56,11 +64,101 @@ class nixlBackendInitParams {
         bool enableTelemetry_ = false;
 };
 
+// Completion object for a single transfer request. The eventfd is used purely as a wakeup,
+// while an atomic terminal status is the source of truth. A backend's progress thread publishes
+// the status once via setStatus(); any thread may read it repeatedly and non-destructively via
+// getStatus() (so an event-driven request can also be polled), and a waiter can multiplex fd()
+// across many completions with poll().
+class nixlCompletion {
+public:
+    struct value {
+        int64_t status : 8 = NIXL_IN_PROG; // signed: holds negative error codes
+        uint64_t completed : 1 = 0;
+        uint64_t reserved : 55 = 0;
+    };
+
+    static_assert(sizeof(value) == 8, "nixlCompletion::value must be 8 bytes for eventfd I/O");
+
+    nixlCompletion() : fd_(eventfd(0, EFD_NONBLOCK)) {}
+
+    ~nixlCompletion() {
+        if (isValid()) {
+            close(fd_);
+        }
+    }
+
+    nixlCompletion(const nixlCompletion &) = delete;
+    nixlCompletion &
+    operator=(const nixlCompletion &) = delete;
+
+    // Eventfd, for multiplexing many completions in a single poll().
+    [[nodiscard]] int
+    fd() const {
+        return fd_;
+    }
+
+    // Publish the terminal status and wake any waiter. Called once by the progress thread.
+    void
+    setStatus(nixl_status_t status) {
+        NIXL_ASSERT(isValid());
+        const value val = {status, 1, 0};
+        value_.store(val, std::memory_order_release);
+        if (write(fd_, &val, sizeof(val)) < 0) {
+            NIXL_PERROR << "nixlCompletion: eventfd write failed for status " << status;
+        }
+    }
+
+    // Read the published status. Repeatable and non-destructive; status is NIXL_IN_PROG and
+    // completed is 0 until setStatus() is called.
+    [[nodiscard]] value
+    getStatus() const {
+        return value_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] bool
+    isValid() const noexcept {
+        return fd_ >= 0;
+    }
+
+private:
+    int fd_;
+    std::atomic<value> value_;
+};
+
 // Pure virtual class to have a common pointer type
 class nixlBackendReqH {
 public:
-    nixlBackendReqH() { }
-    virtual ~nixlBackendReqH() { }
+    nixlBackendReqH() = default;
+
+    virtual ~nixlBackendReqH() = default;
+
+    nixlBackendReqH(nixlBackendReqH &&) = default;
+
+    nixlBackendReqH &
+    operator=(nixlBackendReqH &&) = default;
+
+    nixlBackendReqH(const nixlBackendReqH &) = delete;
+
+    nixlBackendReqH &
+    operator=(const nixlBackendReqH &) = delete;
+
+    [[nodiscard]] nixl_status_t
+    initCompletion() {
+        completion_ = std::make_unique<nixlCompletion>();
+        if (!completion_->isValid()) {
+            completion_.reset();
+            return NIXL_ERR_BACKEND;
+        }
+        return NIXL_SUCCESS;
+    }
+
+    [[nodiscard]] nixlCompletion *
+    getCompletion() const {
+        return completion_.get();
+    }
+
+protected:
+    std::unique_ptr<nixlCompletion> completion_;
 };
 
 // Pure virtual class to have a common pointer type for different backendMD.

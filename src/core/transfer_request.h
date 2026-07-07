@@ -61,6 +61,13 @@ public:
     void
     updateRequestStats(nixlTelemetry *telemetry, nixl_telemetry_stat_status_t stat_status);
 
+    [[nodiscard]] int
+    getEventFd() const {
+        const nixlCompletion *completion =
+            backendHandle != nullptr ? backendHandle->getCompletion() : nullptr;
+        return completion != nullptr ? completion->fd() : -1;
+    }
+
     friend class nixlAgent;
 
 private:

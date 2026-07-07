@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pickle
 import sys
+import time
 from enum import Enum
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -98,12 +99,13 @@ class nixl_prepped_dlist_handle:
 
 
 class nixl_xfer_handle:
-    __slots__ = ("_handle", "_agent", "_released")
+    __slots__ = ("_handle", "_agent", "_released", "_async")
 
     def __init__(self, agent, value: int):
         self._handle = int(value)
         self._agent = agent
         self._released = False
+        self._async = False
 
     def __repr__(self) -> str:
         return f"nixl_xfer_handle(0x{self._handle:x}, released={self._released})"
@@ -642,11 +644,19 @@ class nixl_agent:
     @param handle Handle to the transfer operation, from make_prepped_xfer, or initialize_xfer.
     @param notif_msg Optional notification message can be specified or updated per transfer call.
            notif_msg should be bytes, as that is what will be returned to the target, but will work with str too.
+    @param async_completion If True and the selected backend supports it, the request is armed at
+           post time so the backend progresses it asynchronously and its completion can be polled
+           race-free via check_xfer_state. Ignored by backends that do not support it.
     @return Status of the transfer operation ("DONE", "PROC", or "ERR").
     """
 
-    def transfer(self, handle: nixl_xfer_handle, notif_msg: bytes = b"") -> str:
-        status = self.agent.postXferReq(handle._handle, notif_msg)
+    def transfer(
+        self, handle: nixl_xfer_handle, notif_msg: bytes = b"", async_completion: bool = False
+    ) -> str:
+        status = self.agent.postXferReq(handle._handle, notif_msg, async_completion)
+        # _async reflects whether the backend actually armed a completion, not just the request:
+        # a backend without completion support falls back to status polling.
+        handle._async = self.agent.hasXferCompletion(handle._handle)
         if status == nixlBind.NIXL_SUCCESS:
             return "DONE"
         elif status == nixlBind.NIXL_IN_PROG:
@@ -669,6 +679,58 @@ class nixl_agent:
             return "PROC"
         else:
             return "ERR"
+
+    """
+    @brief Block until at least one of the given transfer requests reaches a terminal state, or
+           until the optional timeout elapses. Requests posted with async_completion are waited
+           on via their event fds; otherwise their status is polled.
+
+    @param handles An iterable of handles.
+    @param timeout_ms Optional timeout in milliseconds; -1 (default) blocks until one completes.
+    @return List of the input handles that reached a terminal state (empty if the timeout
+            elapsed with none completing). Use check_xfer_state on each to get its status.
+    """
+
+    def wait_xfer_any(self, handles, timeout_ms: int = -1) -> list:
+        handles = list(handles)
+        reqhs = [h._handle for h in handles]
+        # Armed (async) requests block efficiently on their eventfds; if any request is non-armed,
+        # busy-poll the whole set (it also observes async completions), so nothing is missed.
+        if all(h._async for h in handles):
+            self.agent.waitXferAnyAsync(reqhs, timeout_ms)
+        else:
+            self.agent.waitXferAnyBusy(reqhs, timeout_ms)
+
+        return [h for h in handles if self.check_xfer_state(h) != "PROC"]
+
+    """
+    @brief Block until all of the given transfer requests reach a terminal state, or until the
+           optional timeout elapses. Built on wait_xfer_any: waits for completions and drops
+           them from the pending set until none remain.
+
+    @param handles An iterable of handles.
+    @param timeout_ms Optional timeout in milliseconds; -1 (default) blocks until all complete.
+    @return List of the input handles that reached a terminal state; on timeout this is the
+            subset that completed so far. Use check_xfer_state on each to get its status.
+    """
+
+    def wait_xfer_all(self, handles, timeout_ms: int = -1) -> list:
+        pending = list(handles)
+        deadline_ms = None if timeout_ms < 0 else time.monotonic_ns() // 1_000_000 + timeout_ms
+        completed = []
+        while pending:
+            if deadline_ms is None:
+                remaining_ms = -1
+            else:
+                remaining_ms = max(0, deadline_ms - time.monotonic_ns() // 1_000_000)
+            done = self.wait_xfer_any(pending, remaining_ms)
+            if not done:
+                break  # timed out with no new completion
+            completed.extend(done)
+            done_ids = {id(h) for h in done}
+            pending = [h for h in pending if id(h) not in done_ids]
+
+        return completed
 
     """
     @brief Get telemetry information of a transfer request.

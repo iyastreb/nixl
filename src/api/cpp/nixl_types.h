@@ -231,6 +231,13 @@ struct nixlAgentOptionalArgs {
      * @var Backend custom parameter
      */
     nixl_blob_t customParam;
+
+    /**
+     * @var asyncCompletion Request that the transfer be armed with a completion object so it can be
+     *      waited on (via eventfd) or polled for completion. Only honored when the selected backend
+     *      advertises supportsCompletion(); ignored otherwise. Used in postXferReq.
+     */
+    bool asyncCompletion = false;
 };
 /**
  * @brief A typedef for a nixlAgentOptionalArgs

@@ -317,6 +317,22 @@ public:
     nixlUcxThreadEngine(const nixlBackendInitParams &init_params, size_t num_dedicated_workers = 0);
     ~nixlUcxThreadEngine();
 
+    bool
+    supportsCompletion() const override {
+        return thread_ != nullptr;
+    }
+
+    nixl_status_t
+    postXfer(const nixl_xfer_op_t &operation,
+             const nixl_meta_dlist_t &local,
+             const nixl_meta_dlist_t &remote,
+             const std::string &remote_agent,
+             nixlBackendReqH *&handle,
+             const nixl_opt_b_args_t *opt_args = nullptr) const override;
+
+    nixl_status_t
+    releaseReqH(nixlBackendReqH *handle) const override;
+
     nixl_status_t
     getNotifs(notif_list_t &notif_list) override;
 

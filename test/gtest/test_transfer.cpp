@@ -21,10 +21,12 @@
 #include "nixl.h"
 #include "nixl_types.h"
 #include "plugin_manager.h"
+#include "transfer_request.h"
 
 #include <absl/strings/str_format.h>
 #include <absl/time/clock.h>
 #include <gtest/gtest.h>
+#include <poll.h>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -183,6 +185,11 @@ protected:
     size_t
     getNumThreads() const {
         return GetParam().numThreads;
+    }
+
+    bool
+    useWait() const {
+        return GetParam().waitForCompletion;
     }
 
     nixl_opt_args_t
@@ -395,6 +402,7 @@ protected:
             threads.emplace_back([&, thread]() {
                 nixl_opt_args_t extra_params;
                 extra_params.notif = notif_msg;
+                extra_params.asyncCompletion = useWait();
 
                 nixlXferReqH *xfer_req = nullptr;
                 nixl_status_t status = from.createXferReq(
@@ -408,19 +416,28 @@ protected:
                 auto start_time = absl::Now();
 
                 for (size_t i = 0; i < repeat; i++) {
-                    status = from.postXferReq(xfer_req);
+                    status = from.postXferReq(xfer_req, useWait() ? &extra_params : nullptr);
                     ASSERT_TRUE((status == NIXL_SUCCESS) || (status == NIXL_IN_PROG));
 
-                    for (int i = 0; i < retry_count; i++) {
+                    if (useWait() && status == NIXL_IN_PROG) {
+                        pollfd pfd{xfer_req->getEventFd(), POLLIN, 0};
+                        ASSERT_GE(pfd.fd, 0);
+                        ASSERT_EQ(poll(&pfd, 1, retry_count * retry_timeout.count()), 1);
+                        EXPECT_NE(pfd.revents & POLLIN, 0);
                         status = from.getXferStatus(xfer_req);
                         EXPECT_TRUE((status == NIXL_SUCCESS) || (status == NIXL_IN_PROG));
-                        if (status == NIXL_SUCCESS) {
-                            break;
+                    } else {
+                        for (int i = 0; i < retry_count; i++) {
+                            status = from.getXferStatus(xfer_req);
+                            EXPECT_TRUE((status == NIXL_SUCCESS) || (status == NIXL_IN_PROG));
+                            if (status == NIXL_SUCCESS) {
+                                break;
+                            }
+                            if (!isProgressThreadEnabled()) {
+                                ASSERT_EQ(NIXL_SUCCESS, to.getNotifs(notif_map));
+                            }
+                            std::this_thread::sleep_for(retry_timeout);
                         }
-                        if (!isProgressThreadEnabled()) {
-                            ASSERT_EQ(NIXL_SUCCESS, to.getNotifs(notif_map));
-                        }
-                        std::this_thread::sleep_for(retry_timeout);
                     }
                     EXPECT_TRUE(status == NIXL_SUCCESS);
                 }
@@ -667,6 +684,8 @@ NIXL_INSTANTIATE_TEST(ucx, TestTransfer, "UCX", true, 2, 0, "");
 NIXL_INSTANTIATE_TEST(ucx_no_pt, TestTransfer, "UCX", false, 2, 0, "");
 NIXL_INSTANTIATE_TEST(ucx_threadpool, TestTransfer, "UCX", true, 6, 4, "");
 NIXL_INSTANTIATE_TEST(ucx_threadpool_no_pt, TestTransfer, "UCX", false, 6, 4, "");
+NIXL_INSTANTIATE_TEST(ucx_wait, TestTransfer, "UCX", true, 2, 0, "", true);
+NIXL_INSTANTIATE_TEST(ucx_threadpool_wait, TestTransfer, "UCX", true, 6, 4, "", true);
 
 NIXL_INSTANTIATE_TEST(ucx_telemetry, TestTransferTelemetry, "UCX", true, 2, 0, "");
 NIXL_INSTANTIATE_TEST(ucx_telemetry_no_pt, TestTransferTelemetry, "UCX", false, 2, 0, "");

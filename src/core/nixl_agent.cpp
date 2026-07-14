@@ -1181,9 +1181,6 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
             opt_args.notifMsg = extra_params->notifMsg;
             req_hndl->hasNotif = true;
             opt_args.hasNotif = true;
-        } else {
-            req_hndl->hasNotif = false;
-            opt_args.hasNotif = false;
         }
     }
 

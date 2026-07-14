@@ -400,23 +400,24 @@ protected:
         nixl_notifs_t notif_map;
         for (size_t thread = 0; thread < num_threads; ++thread) {
             threads.emplace_back([&, thread]() {
-                nixl_opt_args_t extra_params;
-                extra_params.notif = notif_msg;
-                extra_params.asyncCompletion = useWait();
+                nixl_opt_args_t create_params;
+                create_params.notif = notif_msg;
+                nixl_opt_args_t post_params;
+                post_params.asyncCompletion = useWait();
 
                 nixlXferReqH *xfer_req = nullptr;
                 nixl_status_t status = from.createXferReq(
                         NIXL_WRITE,
                         makeDescList<nixlBasicDesc>(src_buffers, src_mem_type),
                         makeDescList<nixlBasicDesc>(dst_buffers, dst_mem_type), to_name,
-                        xfer_req, &extra_params);
+                        xfer_req, &create_params);
                 ASSERT_EQ(status, NIXL_SUCCESS);
                 EXPECT_NE(xfer_req, nullptr);
 
                 auto start_time = absl::Now();
 
                 for (size_t i = 0; i < repeat; i++) {
-                    status = from.postXferReq(xfer_req, useWait() ? &extra_params : nullptr);
+                    status = from.postXferReq(xfer_req, useWait() ? &post_params : nullptr);
                     ASSERT_TRUE((status == NIXL_SUCCESS) || (status == NIXL_IN_PROG));
 
                     if (useWait() && status == NIXL_IN_PROG) {

@@ -74,11 +74,11 @@ public:
     // Notification to be sent after completion of all requests
     struct Notif {
         const std::string agent;
-        const nixl_blob_t payload;
+        std::unique_ptr<std::string> msg;
 
-        Notif(const std::string &remote_agent, const nixl_blob_t &msg)
+        Notif(const std::string &remote_agent, std::unique_ptr<std::string> msg)
             : agent(remote_agent),
-              payload(msg) {}
+              msg(std::move(msg)) {}
     };
 
     std::optional<Notif> notif;
@@ -1265,7 +1265,7 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
 
             ret = int_handle->status();
         } else if (ret == NIXL_IN_PROG) {
-            int_handle->notif.emplace(remote_agent, opt_args->notifMsg);
+            int_handle->notif.emplace(remote_agent, buildNotif(opt_args->notifMsg));
         }
     }
 
@@ -1281,7 +1281,7 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
         return handle_status;
     }
 
-    const nixlUcxBackendReqH::Notif notif(std::move(int_handle->notif).value());
+    nixlUcxBackendReqH::Notif notif(std::move(int_handle->notif).value());
     int_handle->notif.reset();
 
     if (handle_status != NIXL_SUCCESS) [[unlikely]] {
@@ -1295,7 +1295,7 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
 
     nixlUcxReq req;
     const auto &ep = conn->getEp(int_handle->getWorkerId());
-    const nixl_status_t status = notifSendPriv(notif.agent, notif.payload, ep, &req);
+    const nixl_status_t status = sendNotif(std::move(notif.msg), ep, &req);
 
     if (int_handle->append(status, req, conn) != NIXL_SUCCESS) {
         return status;
@@ -1335,19 +1335,21 @@ nixlUcxEngine::progressLoop() {
  * Notifications
 *****************************************/
 
-//agent will provide cached msg
-nixl_status_t
-nixlUcxEngine::notifSendPriv(const std::string &remote_agent,
-                             const std::string &msg,
-                             const std::unique_ptr<nixlUcxEp> &ep,
-                             nixlUcxReq *req) const {
+std::unique_ptr<std::string>
+nixlUcxEngine::buildNotif(const std::string &msg) const {
     nixlSerDes ser_des;
 
     ser_des.addStr("name", localAgent);
     ser_des.addStr("msg", msg);
     // TODO: replace with mpool for performance
+    return std::make_unique<std::string>(ser_des.exportStr());
+}
 
-    std::string *buffer = new std::string(ser_des.exportStr());
+nixl_status_t
+nixlUcxEngine::sendNotif(std::unique_ptr<std::string> msg,
+                         const std::unique_ptr<nixlUcxEp> &ep,
+                         nixlUcxReq *req) {
+    std::string *buffer = msg.release();
     auto deleter = [buffer, req](void *completed_request, void *ptr) {
         delete buffer;
         if ((req == nullptr) && (completed_request != nullptr)) {
@@ -1359,11 +1361,19 @@ nixlUcxEngine::notifSendPriv(const std::string &remote_agent,
     return ep->sendAm(nixl::ucx::am_cb_op_t::NOTIF_STR,
                       nullptr,
                       0,
-                      (void *)buffer->data(),
+                      buffer->data(),
                       buffer->size(),
                       UCP_AM_SEND_FLAG_EAGER,
                       req,
                       deleter);
+}
+
+nixl_status_t
+nixlUcxEngine::notifSendPriv(const std::string &remote_agent,
+                             const std::string &msg,
+                             const std::unique_ptr<nixlUcxEp> &ep,
+                             nixlUcxReq *req) const {
+    return sendNotif(buildNotif(msg), ep, req);
 }
 
 ucx_connection_ptr_t

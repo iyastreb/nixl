@@ -267,14 +267,12 @@ private:
     buildNotif(const std::string &msg) const;
 
     [[nodiscard]] static nixl_status_t
-    sendNotif(std::unique_ptr<std::string> msg,
-              const std::unique_ptr<nixlUcxEp> &ep,
-              nixlUcxReq *req);
+    sendNotif(std::unique_ptr<std::string> msg, const nixlUcxEp &ep, nixlUcxReq *req);
 
     nixl_status_t
     notifSendPriv(const std::string &remote_agent,
                   const std::string &msg,
-                  const std::unique_ptr<nixlUcxEp> &ep,
+                  const nixlUcxEp &ep,
                   nixlUcxReq *req = nullptr) const;
 
     ucx_connection_ptr_t

@@ -634,7 +634,9 @@ TEST_P(TestTransfer, EmptyNotificationPayload) {
         getAgent(0), getAgentName(0), getAgent(1), getAgentName(1), repeat, num_threads, "");
 }
 
-TEST_P(TestTransfer, ListenerCommSize) {
+class TestListener : public TestTransfer {};
+
+TEST_P(TestListener, CommSize) {
     std::vector<MemBuffer> buffers;
     createRegisteredMem(getAgent(1), 64, 10000, DRAM_SEG, buffers);
     auto status = fetchRemoteMD(0, 1);
@@ -643,6 +645,8 @@ TEST_P(TestTransfer, ListenerCommSize) {
         wait_until_true([&]() { return checkRemoteMD(0, 1) == NIXL_SUCCESS; }));
     deregisterMem(getAgent(1), buffers, DRAM_SEG);
 }
+
+NIXL_INSTANTIATE_TEST(ucx, TestListener, "UCX", true, 1, 0, "");
 
 TEST_P(TestTransferTelemetry, GetXferTelemetryFile) {
     env.addVar("NIXL_TELEMETRY_ENABLE", "y");

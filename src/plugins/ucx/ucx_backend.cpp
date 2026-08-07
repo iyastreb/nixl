@@ -1383,7 +1383,7 @@ nixlUcxEngine::buildNotif(const std::string &msg) const {
 }
 
 nixl_status_t
-nixlUcxEngine::sendNotif(std::unique_ptr<std::string> msg, const nixlUcxEp &ep, nixlUcxReq *req) {
+nixlUcxEngine::sendNotif(std::unique_ptr<std::string> &&msg, const nixlUcxEp &ep, nixlUcxReq *req) {
     std::string *buffer = msg.release();
     auto deleter = [buffer, req](void *completed_request, void *ptr) {
         delete buffer;

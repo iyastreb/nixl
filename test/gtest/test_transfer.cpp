@@ -399,11 +399,13 @@ protected:
                 extra_params.notif = notif_msg;
 
                 nixlXferReqH *xfer_req = nullptr;
-                nixl_status_t status = from.createXferReq(
-                        op,
-                        makeDescList<nixlBasicDesc>(src_buffers, src_mem_type),
-                        makeDescList<nixlBasicDesc>(dst_buffers, dst_mem_type), to_name,
-                        xfer_req, &extra_params);
+                nixl_status_t status =
+                    from.createXferReq(op,
+                                       makeDescList<nixlBasicDesc>(src_buffers, src_mem_type),
+                                       makeDescList<nixlBasicDesc>(dst_buffers, dst_mem_type),
+                                       to_name,
+                                       xfer_req,
+                                       &extra_params);
                 ASSERT_EQ(status, NIXL_SUCCESS);
                 EXPECT_NE(xfer_req, nullptr);
 
@@ -591,10 +593,19 @@ TEST_P(TestTransfer, remoteMDFromSocket)
 
     exchangeMDIP(0, 1);
     for (const auto op : {NIXL_WRITE, NIXL_READ}) {
-        doTransfer(getAgent(0), getAgentName(0), getAgent(1), getAgentName(1),
-                   op, size, count, 1, 1,
-                   mem_type, src_buffers,
-                   mem_type, dst_buffers);
+        doTransfer(getAgent(0),
+                   getAgentName(0),
+                   getAgent(1),
+                   getAgentName(1),
+                   op,
+                   size,
+                   count,
+                   1,
+                   1,
+                   mem_type,
+                   src_buffers,
+                   mem_type,
+                   dst_buffers);
     }
 
     invalidateMD(0, 1);

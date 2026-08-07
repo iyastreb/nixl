@@ -125,7 +125,7 @@ class TestErrorHandling : public nixl_test_t {
 
     private:
         std::string m_name;
-        bool                       m_progThread = false;
+        bool m_progThread = false;
         nixlBackendH*              m_backend = nullptr;
         std::unique_ptr<nixlAgent> m_priv    = nullptr;
         std::string                m_MetaRemote;
@@ -262,8 +262,7 @@ TestErrorHandling::Agent::waitForCompletion(nixlXferReqH *req_handle,
 }
 
 nixl_status_t
-TestErrorHandling::Agent::waitForNotif(const std::string &expectedNotif,
-                                       nixl_notifs_t &notifs) {
+TestErrorHandling::Agent::waitForNotif(const std::string &expectedNotif, nixl_notifs_t &notifs) {
     const auto deadline = std::chrono::steady_clock::now() + wait_timeout;
 
     while (notifs[m_MetaRemote].empty()) {

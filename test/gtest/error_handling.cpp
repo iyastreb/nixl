@@ -252,7 +252,11 @@ TestErrorHandling::Agent::waitForCompletion(nixlXferReqH *req_handle,
         status = m_priv->getXferStatus(req_handle);
         EXPECT_NE(NIXL_ERR_NOT_POSTED, status);
         if (!peer.m_progThread && peer.m_priv != nullptr) {
-            peer.m_priv->getNotifs(peer_notifs);
+            const nixl_status_t peer_status = peer.m_priv->getNotifs(peer_notifs);
+            EXPECT_EQ(NIXL_SUCCESS, peer_status);
+            if (peer_status != NIXL_SUCCESS) {
+                break;
+            }
         }
     } while ((status == NIXL_IN_PROG) && (std::chrono::steady_clock::now() < deadline));
 

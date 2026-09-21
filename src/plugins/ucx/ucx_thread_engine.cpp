@@ -54,10 +54,6 @@ public:
     }
 
     ~nixlUcxSharedThread() override {
-        const char signal = 'X';
-        if (write(controlPipe_[1], &signal, sizeof(signal)) < 0) {
-            NIXL_PERROR << "write to progress thread control pipe failed";
-        }
         join();
         close(controlPipe_[0]);
         close(controlPipe_[1]);
@@ -71,12 +67,19 @@ public:
 
 protected:
     void
-    run() override {
+    run(std::stop_token token) override {
         NIXL_DEBUG << "shared " << *this << " running";
+        // A stop request wakes the poll below through the control pipe
+        const std::stop_callback wake(token, [this]() {
+            const char signal = 'X';
+            if (write(controlPipe_[1], &signal, sizeof(signal)) < 0) {
+                NIXL_PERROR << "write to progress thread control pipe failed";
+            }
+        });
+
         // Set timeout event so that the main loop would progress all workers on first iteration
         bool timeout = true;
-        bool pthr_stop = false;
-        while (!pthr_stop) {
+        while (!token.stop_requested()) {
             for (size_t i = 0; i < pollFds_.size() - 1; i++) {
                 if (!(pollFds_[i].revents & POLLIN) && !timeout) {
                     continue;
@@ -104,8 +107,6 @@ protected:
                 if (ret < 0) {
                     NIXL_PERROR << "read() on control pipe failed";
                 }
-
-                pthr_stop = true;
             }
         }
 

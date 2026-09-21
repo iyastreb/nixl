@@ -242,7 +242,7 @@ public:
 
 protected:
     void
-    run() override {
+    run(std::stop_token) override {
         const auto guard = asio::make_work_guard(io_);
         NIXL_DEBUG << "dedicated " << *this << " running";
 

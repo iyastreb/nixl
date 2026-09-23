@@ -17,17 +17,13 @@
 #ifndef NIXL_SRC_PLUGINS_UCX_UCX_THREAD_ENGINE_H
 #define NIXL_SRC_PLUGINS_UCX_UCX_THREAD_ENGINE_H
 
-#include <memory>
 #include <mutex>
 #include <ostream>
 #include <stop_token>
-#include <string>
 #include <thread>
-#include <vector>
+#include <utility>
 
 #include "absl/strings/str_join.h"
-
-#include "common/nixl_log.h"
 
 #include "ucx_backend.h"
 #include "ucx_utils.h"
@@ -37,28 +33,11 @@
  */
 class nixlUcxThread {
 public:
-    nixlUcxThread(const nixlUcxEngine *engine, size_t num_workers) : engine_(engine) {
-        workers_.reserve(num_workers);
-    }
+    nixlUcxThread(const nixlUcxEngine *engine, std::vector<nixlUcxWorker *> workers)
+        : engine_(engine),
+          workers_(std::move(workers)) {}
 
-    virtual ~nixlUcxThread() {
-        NIXL_ASSERT_ALWAYS(!thread_.joinable()) << "thread must be joined before destruction";
-    }
-
-    void
-    start() {
-        NIXL_ASSERT(!thread_.joinable());
-        thread_ = std::jthread([this](std::stop_token token) {
-            tlsThread() = this;
-            run(token);
-        });
-    }
-
-    virtual void
-    addWorker(nixlUcxWorker *worker) {
-        NIXL_ASSERT(workers_.size() < workers_.capacity());
-        workers_.push_back(worker);
-    }
+    virtual ~nixlUcxThread() = default;
 
     const std::vector<nixlUcxWorker *> &
     getWorkers() const {
@@ -87,18 +66,17 @@ protected:
     virtual void
     run(std::stop_token token) = 0;
 
-    void
-    join() {
-        if (thread_.joinable()) {
-            thread_.request_stop();
-            thread_.join();
-        }
+    [[nodiscard]] std::jthread
+    startThread() {
+        return std::jthread([this](std::stop_token token) {
+            tlsThread() = this;
+            run(token);
+        });
     }
 
 private:
     const nixlUcxEngine *engine_;
     std::vector<nixlUcxWorker *> workers_;
-    std::jthread thread_;
 };
 
 /**
@@ -118,8 +96,8 @@ protected:
     appendNotif(std::string &&remote_name, std::string &&msg) override;
 
 private:
-    std::unique_ptr<nixlUcxThread> thread_;
     std::mutex notifMutex_;
+    std::unique_ptr<nixlUcxThread> thread_;
 };
 
 #endif // NIXL_SRC_PLUGINS_UCX_UCX_THREAD_ENGINE_H

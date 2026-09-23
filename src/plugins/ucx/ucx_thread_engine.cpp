@@ -36,8 +36,8 @@ namespace {
 class nixlUcxSharedThread : public nixlUcxThread {
 public:
     nixlUcxSharedThread(const nixlUcxEngine *engine,
-                       std::vector<nixlUcxWorker *> workers,
-                       nixlTime::us_t delay)
+                        std::vector<nixlUcxWorker *> workers,
+                        nixlTime::us_t delay)
         : nixlUcxThread(engine, std::move(workers)) {
         int control_pipe[2];
         if (pipe(control_pipe) < 0) {
@@ -137,7 +137,8 @@ nixlUcxThreadEngine::nixlUcxThreadEngine(const nixlBackendInitParams &init_param
     for (const auto &worker : getSharedWorkers()) {
         workers.push_back(worker.get());
     }
-    thread_ = std::make_unique<nixlUcxSharedThread>(this, std::move(workers), init_params.pthrDelay);
+    thread_ =
+        std::make_unique<nixlUcxSharedThread>(this, std::move(workers), init_params.pthrDelay);
 }
 
 void

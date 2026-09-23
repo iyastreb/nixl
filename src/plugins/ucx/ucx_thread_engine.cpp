@@ -33,7 +33,7 @@
 
 namespace {
 
-class nixlUcxSharedThread : public nixlUcxThread {
+class nixlUcxSharedThread final : public nixlUcxThread {
 public:
     nixlUcxSharedThread(const nixlUcxEngine *engine,
                         std::vector<nixlUcxWorker *> workers,

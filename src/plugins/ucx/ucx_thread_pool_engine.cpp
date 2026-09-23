@@ -206,7 +206,7 @@ private:
 
 } // namespace
 
-class nixlUcxDedicatedThread : public nixlUcxThread {
+class nixlUcxDedicatedThread final : public nixlUcxThread {
 public:
     nixlUcxDedicatedThread(nixlUcxEngine *engine, nixlUcxWorker *worker)
         : nixlUcxThread(engine, {worker}),

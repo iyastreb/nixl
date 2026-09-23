@@ -19,13 +19,15 @@
 #include "ucx_backend_req.h"
 
 #include "common/backend.h"
+#include "common/blocking_queue.h"
 #include "common/nixl_log.h"
 
 #include <algorithm>
 #include <atomic>
-#include <future>
+#include <functional>
+#include <latch>
 #include <ostream>
-#include <asio.hpp>
+#include <utility>
 
 #include "absl/container/inlined_vector.h"
 
@@ -33,9 +35,60 @@
 
 namespace {
 
-constexpr size_t inline_chunk_futures = 16;
+constexpr size_t inline_worker_tasks = 16;
 
+class nixlUcxDedicatedWorker;
 struct nixlUcxBackendSharedState;
+
+/**
+ * @brief Job executed by all dedicated threads, with shared completion tracking.
+ */
+class nixlUcxThreadpoolJob {
+public:
+    using task_function_t = std::function<nixl_status_t(nixlUcxDedicatedWorker &)>;
+
+    struct task : nixl::blockingQueue<task>::node {
+        explicit task(nixlUcxThreadpoolJob &job) : job(job) {}
+
+        nixlUcxThreadpoolJob &job;
+    };
+
+    nixlUcxThreadpoolJob(size_t num_tasks, task_function_t task_function)
+        : taskFunction_(std::move(task_function)),
+          status_(NIXL_SUCCESS),
+          completed_(num_tasks) {
+        tasks_.reserve(num_tasks);
+        for (size_t i = 0; i < num_tasks; ++i) {
+            tasks_.emplace_back(*this);
+        }
+    }
+
+    [[nodiscard]] task *
+    getTask(size_t idx) {
+        return &tasks_[idx];
+    }
+
+    void
+    runTask(nixlUcxDedicatedWorker &worker) noexcept {
+        const nixl_status_t ret = taskFunction_(worker);
+        if (ret != NIXL_SUCCESS) {
+            status_.store(ret);
+        }
+        completed_.count_down();
+    }
+
+    [[nodiscard]] nixl_status_t
+    waitAll() {
+        completed_.wait();
+        return status_.load();
+    }
+
+private:
+    task_function_t taskFunction_;
+    std::atomic<nixl_status_t> status_;
+    std::latch completed_;
+    absl::InlinedVector<task, inline_worker_tasks> tasks_;
+};
 
 /*
  * This class represents a chunk of a composite request.
@@ -123,16 +176,10 @@ nixlUcxChunkBackendReqH::status() {
  */
 class nixlUcxCompositeBackendReqH : public nixlUcxBackendReqH {
 public:
-    nixlUcxCompositeBackendReqH(nixlUcxWorker *worker, size_t chunk_size, size_t num_chunks)
+    nixlUcxCompositeBackendReqH(nixlUcxWorker *worker, size_t num_chunks)
         : nixlUcxBackendReqH(worker),
-          sharedState_(std::make_shared<nixlUcxBackendSharedState>()),
-          chunkSize_(chunk_size) {
+          sharedState_(std::make_shared<nixlUcxBackendSharedState>()) {
         sharedState_->chunks.resize(num_chunks);
-    }
-
-    [[nodiscard]] size_t
-    getChunkSize() const noexcept {
-        return chunkSize_;
     }
 
     [[nodiscard]] size_t
@@ -151,6 +198,7 @@ public:
     startChunk(size_t idx, nixlUcxWorker *worker) {
         nixlUcxChunkBackendReqH *chunk = &sharedState_->chunks[idx];
         chunk->startXfer(sharedState_, worker);
+        NIXL_TRACE << "dedicated " << *nixlUcxThread::tlsThread() << " starting " << *chunk;
         return chunk;
     }
 
@@ -201,16 +249,13 @@ public:
 
 private:
     std::shared_ptr<nixlUcxBackendSharedState> sharedState_;
-    size_t chunkSize_;
 };
 
 } // namespace
 
 class nixlUcxDedicatedThread : public nixlUcxThread {
 public:
-    nixlUcxDedicatedThread(nixlUcxEngine *engine, nixlUcxWorker *worker)
-        : nixlUcxThread(engine, {worker}),
-          thread_(startThread()) {}
+    nixlUcxDedicatedThread(nixlUcxEngine *engine, nixlUcxDedicatedWorker &worker);
 
     static nixlUcxDedicatedThread *
     getDedicatedThread() {
@@ -218,39 +263,36 @@ public:
     }
 
     /**
-     * @brief Queue a job for execution on this thread
-     * @param task Packaged task to run; asio retrieves its future, so the
-     *             caller must not call get_future() on it
-     * @return Future of the task result
+     * @brief Queue a task for execution on this thread
+     * @param task Task owned by a job that stays alive until all its tasks finish
      */
-    template<typename R>
-    [[nodiscard]] std::future<R>
-    post(std::packaged_task<R()> task) {
-        return asio::post(io_, std::move(task));
+    void
+    post(nixlUcxThreadpoolJob::task *task) {
+        queue_.push(task);
     }
 
     void
     addRequest(nixlUcxChunkBackendReqH *handle) {
+        NIXL_TRACE << "dedicated " << *this << " sent " << *handle;
         requests_.push_back(handle);
     }
 
 protected:
     void
     run(std::stop_token token) override {
-        const auto guard = asio::make_work_guard(io_);
-        const std::stop_callback stop(token, [this]() { io_.stop(); });
         NIXL_DEBUG << "dedicated " << *this << " running";
 
-        while (!io_.stopped()) {
+        while (!token.stop_requested()) {
+            nixlUcxThreadpoolJob::task *task;
             if (!requests_.empty()) {
-                io_.poll_one();
+                task = queue_.tryPop();
             } else {
                 NIXL_TRACE << "dedicated " << *this << " waiting for requests";
-                io_.run_one();
+                task = queue_.pop(token);
             }
 
-            if (requests_.empty()) {
-                continue;
+            if (task != nullptr) {
+                task->job.runTask(worker_);
             }
 
             for (auto it = requests_.begin(); it != requests_.end();) {
@@ -280,23 +322,78 @@ protected:
     }
 
 private:
-    asio::io_context io_;
+    nixlUcxDedicatedWorker &worker_;
+    nixl::blockingQueue<nixlUcxThreadpoolJob::task> queue_;
     std::vector<nixlUcxChunkBackendReqH *> requests_;
     std::jthread thread_;
 };
 
+namespace {
+
+/**
+ * @brief UCX worker that owns its dedicated thread.
+ */
+class nixlUcxDedicatedWorker : public nixlUcxWorker {
+public:
+    nixlUcxDedicatedWorker(const nixlUcxContext &context,
+                           ucp_err_handling_mode_t err_handling_mode,
+                           size_t id,
+                           nixlUcxEngine *engine)
+        : nixlUcxWorker(context, err_handling_mode, id),
+          thread_(std::make_unique<nixlUcxDedicatedThread>(engine, *this)) {}
+
+    void
+    stopThread() {
+        thread_.reset();
+    }
+
+    [[nodiscard]] nixlUcxDedicatedThread *
+    getThread() const noexcept {
+        return thread_.get();
+    }
+
+private:
+    std::unique_ptr<nixlUcxDedicatedThread> thread_;
+};
+
+} // namespace
+
+nixlUcxDedicatedThread::nixlUcxDedicatedThread(nixlUcxEngine *engine,
+                                               nixlUcxDedicatedWorker &worker)
+    : nixlUcxThread(engine, {&worker}),
+      worker_(worker),
+      thread_(startThread()) {}
+
 nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &init_params,
                                                  size_t num_threads)
     : nixlUcxThreadEngine(init_params, num_threads) {
-    splitBatchSize_ =
-        nixl::getBackendParamDefaulted(init_params.customParams, "split_batch_size", 1024u);
+    splitBatchSize_ = std::max<size_t>(
+        num_threads,
+        nixl::getBackendParamDefaulted(init_params.customParams, "split_batch_size", 1024u));
 
-    const auto dedicated_workers = getDedicatedWorkers();
-    dedicatedThreads_.reserve(dedicated_workers.size());
-    for (size_t i = 0; i < dedicated_workers.size(); ++i) {
-        dedicatedThreads_.emplace_back(
-            std::make_unique<nixlUcxDedicatedThread>(this, dedicated_workers[i].get()));
+    for (size_t i = 0; i < num_threads; ++i) {
+        addWorker<nixlUcxDedicatedWorker>(this);
     }
+}
+
+nixlUcxThreadPoolEngine::~nixlUcxThreadPoolEngine() {
+    for (const auto &worker : getDedicatedWorkers()) {
+        static_cast<nixlUcxDedicatedWorker *>(worker.get())->stopThread();
+    }
+}
+
+template<typename callbackType>
+nixl_status_t
+nixlUcxThreadPoolEngine::execute(callbackType &&callback) const {
+    const auto workers = getDedicatedWorkers();
+    nixlUcxThreadpoolJob job(workers.size(), std::forward<callbackType>(callback));
+
+    for (size_t i = 0; i < workers.size(); ++i) {
+        auto &worker = *static_cast<nixlUcxDedicatedWorker *>(workers[i].get());
+        worker.getThread()->post(job.getTask(i));
+    }
+
+    return job.waitAll();
 }
 
 nixl_status_t
@@ -311,13 +408,9 @@ nixlUcxThreadPoolEngine::prepXfer(const nixl_xfer_op_t &operation,
         return nixlUcxEngine::prepXfer(operation, local, remote, remote_agent, handle, opt_args);
     }
 
-    const size_t num_threads = dedicatedThreads_.size();
-    const size_t chunk_size =
-        std::max((batch_size + num_threads - 1) / num_threads, splitBatchSize_);
-    size_t num_chunks = (batch_size + chunk_size - 1) / chunk_size;
-
-    const auto comp_handle = new nixlUcxCompositeBackendReqH(
-        getSharedWorker(getSharedWorkerId()).get(), chunk_size, num_chunks);
+    const size_t num_chunks = getDedicatedWorkers().size();
+    const auto comp_handle =
+        new nixlUcxCompositeBackendReqH(getSharedWorker(getSharedWorkerId()).get(), num_chunks);
     NIXL_TRACE << "created " << *comp_handle;
     handle = comp_handle;
     return NIXL_SUCCESS;
@@ -339,46 +432,26 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
     const auto comp_handle = static_cast<nixlUcxCompositeBackendReqH *>(int_handle);
     comp_handle->startXfer();
-    size_t chunk_size = comp_handle->getChunkSize();
+    const size_t batch_size = local.descCount();
+    const size_t num_chunks = comp_handle->getNumChunks();
     NIXL_TRACE << "sending " << *comp_handle;
 
-    std::atomic<nixl_status_t> status{NIXL_SUCCESS};
-    absl::InlinedVector<std::future<void>, inline_chunk_futures> futures;
-    futures.reserve(comp_handle->getNumChunks());
+    const nixl_status_t status = execute([&](nixlUcxDedicatedWorker &worker) {
+        const size_t i = worker.getId() - getSharedWorkersSize();
+        nixlUcxChunkBackendReqH *chunk_handle = comp_handle->startChunk(i, &worker);
 
-    for (size_t i = 0; i < comp_handle->getNumChunks(); i++) {
-        // Chunks are distributed round-robin over the dedicated threads
-        nixlUcxDedicatedThread *thread = dedicatedThreads_[i % dedicatedThreads_.size()].get();
-        futures.push_back(thread->post(std::packaged_task<void()>([&, i, thread]() {
-            NIXL_ASSERT(thread == nixlUcxDedicatedThread::getDedicatedThread());
+        const size_t chunk_start = i * batch_size / num_chunks;
+        const size_t chunk_end = (i + 1) * batch_size / num_chunks;
+        const nixl_status_t ret = nixlUcxEngine::sendXferRange(
+            operation, local, remote, remote_agent, chunk_handle, chunk_start, chunk_end);
+        if (ret != NIXL_SUCCESS) {
+            chunk_handle->complete(ret);
+        } else {
+            worker.getThread()->addRequest(chunk_handle);
+        }
+        return ret;
+    });
 
-            nixlUcxChunkBackendReqH *chunk_handle =
-                comp_handle->startChunk(i, thread->getWorkers()[0]);
-            NIXL_TRACE << "dedicated " << *thread << " starting " << *chunk_handle;
-
-            size_t start_idx = i * chunk_size;
-            size_t end_idx =
-                std::min(start_idx + chunk_size, static_cast<size_t>(local.descCount()));
-            nixl_status_t ret = nixlUcxEngine::sendXferRange(
-                operation, local, remote, remote_agent, chunk_handle, start_idx, end_idx);
-            if (ret != NIXL_SUCCESS) {
-                status.store(ret);
-                chunk_handle->complete(ret);
-            } else {
-                NIXL_TRACE << "dedicated " << *thread << " sent " << *chunk_handle;
-                thread->addRequest(chunk_handle);
-            }
-        })));
-    }
-
-    // The last posted chunk is the likeliest to finish last
-    for (auto it = futures.rbegin(); it != futures.rend(); ++it) {
-        it->wait();
-    }
-    for (auto &future : futures) {
-        future.get();
-    }
-
-    NIXL_TRACE << "sent " << *comp_handle << " with status: " << status.load();
-    return status.load();
+    NIXL_TRACE << "sent " << *comp_handle << " with status: " << status;
+    return status;
 }

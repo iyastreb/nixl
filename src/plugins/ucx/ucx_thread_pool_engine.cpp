@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <exception>
 #include <functional>
 #include <latch>
 #include <ostream>
@@ -76,9 +77,15 @@ public:
 
     void
     run(nixlUcxDedicatedWorker &worker) noexcept override {
-        const nixl_status_t ret = taskFunction_(worker);
-        if (ret != NIXL_SUCCESS) {
-            status_.store(ret);
+        try {
+            const nixl_status_t ret = taskFunction_(worker);
+            if (ret != NIXL_SUCCESS) {
+                status_.store(ret);
+            }
+        }
+        catch (const std::exception &e) {
+            NIXL_ERROR << "Threadpool task failed: " << e.what();
+            status_.store(NIXL_ERR_BACKEND);
         }
         completed_.count_down();
     }

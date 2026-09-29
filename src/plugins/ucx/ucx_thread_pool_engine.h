@@ -50,7 +50,7 @@ private:
     nixl_status_t
     execute(callbackType &&callback) const;
 
-    size_t splitBatchSize_;
+    const size_t splitBatchSize_;
 };
 
 #endif // NIXL_SRC_PLUGINS_UCX_UCX_THREAD_POOL_ENGINE_H

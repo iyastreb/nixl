@@ -41,7 +41,7 @@ class nixlUcxDedicatedWorker;
 struct nixlUcxBackendSharedState;
 
 /**
- * @brief Task executed by a dedicated worker thread.
+ * @brief Task executed by a single dedicated worker thread.
  */
 class nixlUcxThreadTask : public nixl::blockingQueue<nixlUcxThreadTask>::node {
 public:
@@ -53,24 +53,13 @@ protected:
 };
 
 /**
- * @brief Job executed by all dedicated threads, with shared completion tracking.
+ * @brief Task executed by multiple dedicated threads, with shared completion tracking.
  */
-class nixlUcxThreadpoolJob {
+class nixlUcxThreadPoolTask final : public nixlUcxThreadTask {
 public:
     using task_function_t = std::function<nixl_status_t(nixlUcxDedicatedWorker &)>;
 
-    struct task : nixlUcxThreadTask {
-        explicit task(nixlUcxThreadpoolJob &job) : job(job) {}
-
-        void
-        run(nixlUcxDedicatedWorker &worker) noexcept override {
-            job.runTask(worker);
-        }
-
-        nixlUcxThreadpoolJob &job;
-    };
-
-    nixlUcxThreadpoolJob(size_t num_tasks, task_function_t task_function)
+    nixlUcxThreadPoolTask(size_t num_tasks, task_function_t task_function)
         : taskFunction_(std::move(task_function)),
           status_(NIXL_SUCCESS),
           completed_(num_tasks) {
@@ -80,13 +69,13 @@ public:
         }
     }
 
-    [[nodiscard]] task *
+    [[nodiscard]] nixlUcxThreadTask *
     getTask(size_t idx) {
         return &tasks_[idx];
     }
 
     void
-    runTask(nixlUcxDedicatedWorker &worker) noexcept {
+    run(nixlUcxDedicatedWorker &worker) noexcept override {
         const nixl_status_t ret = taskFunction_(worker);
         if (ret != NIXL_SUCCESS) {
             status_.store(ret);
@@ -101,10 +90,21 @@ public:
     }
 
 private:
+    struct subtask final : nixlUcxThreadTask {
+        explicit subtask(nixlUcxThreadPoolTask &task) noexcept : task(task) {}
+
+        void
+        run(nixlUcxDedicatedWorker &worker) noexcept override {
+            task.run(worker);
+        }
+
+        nixlUcxThreadPoolTask &task;
+    };
+
     task_function_t taskFunction_;
     std::atomic<nixl_status_t> status_;
     std::latch completed_;
-    absl::InlinedVector<task, inline_worker_tasks> tasks_;
+    absl::InlinedVector<subtask, inline_worker_tasks> tasks_;
 };
 
 /*
@@ -357,20 +357,20 @@ public:
                            size_t id,
                            nixlUcxEngine *engine)
         : nixlUcxWorker(context, err_handling_mode, id),
-          thread_(std::make_unique<nixlUcxDedicatedThread>(engine, *this)) {}
+          thread_(std::in_place, engine, *this) {}
 
     void
     stopThread() {
         thread_.reset();
     }
 
-    [[nodiscard]] nixlUcxDedicatedThread *
-    getThread() const noexcept {
-        return thread_.get();
+    [[nodiscard]] nixlUcxDedicatedThread &
+    getThread() noexcept {
+        return *thread_;
     }
 
 private:
-    std::unique_ptr<nixlUcxDedicatedThread> thread_;
+    std::optional<nixlUcxDedicatedThread> thread_;
 };
 
 } // namespace
@@ -383,10 +383,10 @@ nixlUcxDedicatedThread::nixlUcxDedicatedThread(nixlUcxEngine *engine,
 
 nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &init_params,
                                                  size_t num_threads)
-    : nixlUcxThreadEngine(init_params, num_threads) {
-    splitBatchSize_ = std::max<size_t>(
-        num_threads,
-        nixl::getBackendParamDefaulted(init_params.customParams, "split_batch_size", 1024u));
+    : nixlUcxThreadEngine(init_params, num_threads),
+      splitBatchSize_(std::max<size_t>(
+          num_threads,
+          nixl::getBackendParamDefaulted(init_params.customParams, "split_batch_size", 1024u))) {
 
     for (size_t i = 0; i < num_threads; ++i) {
         addWorker<nixlUcxDedicatedWorker>(this);
@@ -403,14 +403,14 @@ template<typename callbackType>
 nixl_status_t
 nixlUcxThreadPoolEngine::execute(callbackType &&callback) const {
     const auto workers = getDedicatedWorkers();
-    nixlUcxThreadpoolJob job(workers.size(), std::forward<callbackType>(callback));
+    nixlUcxThreadPoolTask task(workers.size(), std::forward<callbackType>(callback));
 
     for (size_t i = 0; i < workers.size(); ++i) {
         auto &worker = *static_cast<nixlUcxDedicatedWorker *>(workers[i].get());
-        worker.getThread()->post(job.getTask(i));
+        worker.getThread().post(task.getTask(i));
     }
 
-    return job.waitAll();
+    return task.waitAll();
 }
 
 nixl_status_t
@@ -464,7 +464,7 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
         if (ret != NIXL_SUCCESS) {
             chunk_handle->complete(ret);
         } else {
-            worker.getThread()->addRequest(chunk_handle);
+            worker.getThread().addRequest(chunk_handle);
         }
         return ret;
     });

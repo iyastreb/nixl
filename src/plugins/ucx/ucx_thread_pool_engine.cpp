@@ -466,14 +466,20 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
         const size_t chunk_start = i * batch_size / num_chunks;
         const size_t chunk_end = (i + 1) * batch_size / num_chunks;
-        const nixl_status_t ret = nixlUcxEngine::sendXferRange(
-            operation, local, remote, remote_agent, chunk_handle, chunk_start, chunk_end);
-        if (ret != NIXL_SUCCESS) {
-            chunk_handle->complete(ret);
-        } else {
-            worker.getThread().addRequest(chunk_handle);
+        try {
+            const nixl_status_t ret = nixlUcxEngine::sendXferRange(
+                operation, local, remote, remote_agent, chunk_handle, chunk_start, chunk_end);
+            if (ret != NIXL_SUCCESS) {
+                chunk_handle->complete(ret);
+            } else {
+                worker.getThread().addRequest(chunk_handle);
+            }
+            return ret;
         }
-        return ret;
+        catch (const std::exception &) {
+            chunk_handle->complete(NIXL_ERR_BACKEND);
+            throw;
+        }
     });
 
     NIXL_TRACE << "sent " << *comp_handle << " with status: " << status;

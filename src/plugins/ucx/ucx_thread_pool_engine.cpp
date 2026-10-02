@@ -25,10 +25,8 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
-#include <functional>
 #include <latch>
 #include <ostream>
-#include <utility>
 
 #include "absl/container/inlined_vector.h"
 
@@ -56,12 +54,10 @@ protected:
 /**
  * @brief Task executed by multiple dedicated threads, with shared completion tracking.
  */
-class nixlUcxThreadPoolTask final : public nixlUcxThreadTask {
+template<typename taskFunctionType> class nixlUcxThreadPoolTask final {
 public:
-    using task_function_t = std::function<nixl_status_t(nixlUcxDedicatedWorker &)>;
-
-    nixlUcxThreadPoolTask(size_t num_tasks, task_function_t task_function)
-        : taskFunction_(std::move(task_function)),
+    nixlUcxThreadPoolTask(size_t num_tasks, taskFunctionType &task_function)
+        : taskFunction_(task_function),
           status_(NIXL_SUCCESS),
           completed_(num_tasks) {
         tasks_.reserve(num_tasks);
@@ -76,7 +72,7 @@ public:
     }
 
     void
-    run(nixlUcxDedicatedWorker &worker) noexcept override {
+    run(nixlUcxDedicatedWorker &worker) noexcept {
         try {
             const nixl_status_t ret = taskFunction_(worker);
             if (ret != NIXL_SUCCESS) {
@@ -108,7 +104,7 @@ private:
         nixlUcxThreadPoolTask &task;
     };
 
-    task_function_t taskFunction_;
+    taskFunctionType &taskFunction_;
     std::atomic<nixl_status_t> status_;
     std::latch completed_;
     absl::InlinedVector<subtask, inline_worker_tasks> tasks_;
@@ -287,8 +283,8 @@ public:
     }
 
     /**
-     * @brief Queue a task for execution on this thread
-     * @param task Task that stays alive until execution finishes
+     * @brief Queue a task for execution on this thread without taking ownership
+     * @param task Task the caller must keep alive until execution completes
      */
     void
     post(nixlUcxThreadTask *task) {
@@ -410,7 +406,7 @@ template<typename callbackType>
 nixl_status_t
 nixlUcxThreadPoolEngine::execute(callbackType &&callback) const {
     const auto workers = getDedicatedWorkers();
-    nixlUcxThreadPoolTask task(workers.size(), std::forward<callbackType>(callback));
+    nixlUcxThreadPoolTask task(workers.size(), callback);
 
     for (size_t i = 0; i < workers.size(); ++i) {
         auto &worker = *static_cast<nixlUcxDedicatedWorker *>(workers[i].get());

@@ -387,10 +387,11 @@ nixlUcxDedicatedThread::nixlUcxDedicatedThread(nixlUcxEngine *engine,
 nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &init_params,
                                                  size_t num_threads)
     : nixlUcxThreadEngine(init_params, num_threads),
-      splitBatchSize_(std::max<size_t>(
-          num_threads,
-          nixl::getBackendParamDefaulted(
-              init_params.customParams, "split_batch_size", isSglEnabled() ? 4096u : 1024u))) {
+      splitBatchSize_(
+          std::max<size_t>(num_threads,
+                           nixl::getBackendParamDefaulted(init_params.customParams,
+                                                          "split_batch_size",
+                                                          isSglEnabled() ? 4096u : 1024u))) {
 
     for (size_t i = 0; i < num_threads; ++i) {
         addWorker<nixlUcxDedicatedWorker>(this);

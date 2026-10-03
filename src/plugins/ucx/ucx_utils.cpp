@@ -88,9 +88,9 @@ void
 nixlUcxEp::err_cb(ucp_ep_h ucp_ep, ucs_status_t status) {
     const auto current_state = state_.load(std::memory_order_relaxed);
 
-    NIXL_DEBUG << "ep " << eph << ": state " << current_state
-               << ", UCX error handling callback was invoked with status " << status << " ("
-               << ucs_status_string(status) << ")";
+    NIXL_WARN << "ep " << eph << ": state " << static_cast<int>(current_state)
+              << ", UCX error handling callback was invoked with status " << status << " ("
+              << ucs_status_string(status) << ")";
 
     NIXL_ASSERT(eph == ucp_ep);
 

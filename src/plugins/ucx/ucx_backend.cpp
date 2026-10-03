@@ -156,6 +156,7 @@ nixl_status_t nixlUcxEngine::connect(const std::string &remote_agent) {
 }
 
 nixl_status_t nixlUcxEngine::disconnect(const std::string &remote_agent) {
+    NIXL_WARN << "disconnecting remote agent '" << remote_agent << "'";
     const auto it = remoteConnMap.find(remote_agent);
 
     if (it == remoteConnMap.end()) {

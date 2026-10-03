@@ -1718,6 +1718,7 @@ nixlAgent::loadRemoteMD(const nixl_blob_t &remote_metadata, std::string &agent_n
 // by backends acting on an inbound invalidation (P2P INVL, etcd watch).
 nixl_status_t
 nixlAgentData::invalidateRemoteMD(const std::string &remote_agent) {
+    NIXL_WARN << "invalidateRemoteMD for agent '" << remote_agent << "'";
     // name_ is fixed at construction, so this needs no lock.
     if (remote_agent == name_) {
         NIXL_ERROR_FUNC << "remote agent same as local agent, cannot invalidate local metadata";

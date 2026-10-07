@@ -251,6 +251,31 @@ nixlUcxEp::sendAm(nixl::ucx::am_cb_op_t msg_id,
     return nixl::ucx::ucsToNixlStatus(UCS_PTR_STATUS(request));
 }
 
+nixl_status_t
+nixlUcxEp::sendAmRef(nixl::ucx::am_cb_op_t msg_id,
+                     const std::string &payload,
+                     uint32_t flags,
+                     nixlUcxReq &req) const {
+    const nixl_status_t status = checkTxState();
+    if (status != NIXL_SUCCESS) {
+        return status;
+    }
+
+    ucp_request_param_t param;
+    param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+    param.flags = flags;
+    param.memory_type = UCS_MEMORY_TYPE_HOST;
+
+    const ucs_status_ptr_t request =
+        ucp_am_send_nbx(eph, unsigned(msg_id), nullptr, 0, payload.data(), payload.size(), &param);
+    if (UCS_PTR_IS_PTR(request)) {
+        req = static_cast<nixlUcxReq>(request);
+        return NIXL_IN_PROG;
+    }
+
+    return nixl::ucx::ucsToNixlStatus(UCS_PTR_STATUS(request));
+}
+
 /* ===========================================
  * Data transfer
  * =========================================== */

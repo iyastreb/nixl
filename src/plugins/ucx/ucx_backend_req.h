@@ -34,6 +34,8 @@ public:
     // Notification to be sent over the bound connection after completion of all requests.
     // Empty if there is no pending notification.
     std::string notif;
+    // Payload of the notification being sent, owned until the send completes
+    std::string notifSending;
 
 #ifdef HAVE_UCX_SGL_API
     std::optional<nixl::ucx::sglXfer> sgl;

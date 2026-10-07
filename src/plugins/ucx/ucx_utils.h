@@ -84,6 +84,17 @@ public:
            uint32_t flags,
            nixlUcxReq *req = nullptr) const;
 
+    /**
+     * @brief Send an active message from a caller-owned payload
+     * @param payload Must stay valid until the returned request completes
+     * @param req Receives the UCX request of an in-progress send
+     */
+    [[nodiscard]] nixl_status_t
+    sendAmRef(nixl::ucx::am_cb_op_t msg_id,
+              const std::string &payload,
+              uint32_t flags,
+              nixlUcxReq &req) const;
+
     /* Data access */
     [[nodiscard]] nixl_status_t
     read(uint64_t raddr,

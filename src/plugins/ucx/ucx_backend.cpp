@@ -26,6 +26,7 @@
 #include "common/configuration.h"
 #include "common/nixl_log.h"
 
+#include <cstring>
 #include <optional>
 #include <string.h>
 #include "absl/strings/str_split.h"
@@ -43,6 +44,43 @@ sglEnabledFromConfig() {
     }
     return false;
 #endif
+}
+
+// Notifications up to this size are sent from the request handle without a send
+// context; larger ones may use zero-copy, which is slower from a reused buffer
+constexpr size_t notif_owned_max_size = 2048;
+
+// Notification fields, in the nixlSerDes format: tag, length, value, '|'
+constexpr std::string_view notif_serdes_hdr = "nixlSerDes|";
+constexpr std::string_view notif_name_tag = "name";
+constexpr std::string_view notif_msg_tag = "msg";
+
+void
+appendNotifField(std::string &out, std::string_view tag, std::string_view value) {
+    const size_t len = value.size();
+    out.append(tag);
+    out.append(reinterpret_cast<const char *>(&len), sizeof(len));
+    out.append(value);
+    out.push_back('|');
+}
+
+// Parse the next field and advance the offset, return false on a malformed buffer
+[[nodiscard]] bool
+parseNotifField(std::string_view buf, size_t &offset, std::string_view tag, std::string_view &value) {
+    size_t len;
+    if ((buf.size() < offset + tag.size() + sizeof(len)) || (buf.substr(offset, tag.size()) != tag)) {
+        return false;
+    }
+
+    std::memcpy(&len, buf.data() + offset + tag.size(), sizeof(len));
+    offset += tag.size() + sizeof(len);
+    if (buf.size() < offset + len + 1) {
+        return false;
+    }
+
+    value = buf.substr(offset, len);
+    offset += len + 1;
+    return true;
 }
 
 [[nodiscard]] ucp_err_handling_mode_t
@@ -113,6 +151,8 @@ nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params, size_t nu
 
     auto &worker = workers_.front();
     workerAddr = worker->epAddr();
+    notifPrefix_ = notif_serdes_hdr;
+    appendNotifField(notifPrefix_, notif_name_tag, localAgent);
     worker->regAmCallback(nixl::ucx::am_cb_op_t::NOTIF_STR, notifAmCb, this);
 }
 
@@ -611,8 +651,23 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
     }
 
     nixlUcxReq req;
-    const nixl_status_t status = sendNotif(std::move(int_handle->notif), int_handle->getEp(), &req);
-    int_handle->notif.clear();
+    nixl_status_t status;
+    if (int_handle->notif.size() <= notif_owned_max_size) [[likely]] {
+        // The handle owns the payload until the send completes, so no send context
+        // is allocated, and an inline send completes the transfer right away
+        int_handle->notifSending.swap(int_handle->notif);
+        int_handle->notif.clear();
+        status = int_handle->getEp().sendAmRef(nixl::ucx::am_cb_op_t::NOTIF_STR,
+                                               int_handle->notifSending,
+                                               UCP_AM_SEND_FLAG_EAGER,
+                                               req);
+        if (status == NIXL_SUCCESS) [[likely]] {
+            return NIXL_SUCCESS;
+        }
+    } else {
+        status = sendNotif(std::move(int_handle->notif), int_handle->getEp(), &req);
+        int_handle->notif.clear();
+    }
 
     if (int_handle->append(status, req) != NIXL_SUCCESS) {
         return status;
@@ -654,12 +709,11 @@ nixlUcxEngine::progressLoop() {
 
 std::string
 nixlUcxEngine::buildNotif(const std::string &msg) const {
-    nixlSerDes ser_des;
-
-    ser_des.addStr("name", localAgent);
-    ser_des.addStr("msg", msg);
-    // TODO: replace with mpool for performance
-    return ser_des.exportStr();
+    std::string notif;
+    notif.reserve(notifPrefix_.size() + notif_msg_tag.size() + sizeof(size_t) + msg.size() + 1);
+    notif.append(notifPrefix_);
+    appendNotifField(notif, notif_msg_tag, msg);
+    return notif;
 }
 
 nixl_status_t
@@ -693,20 +747,24 @@ nixlUcxEngine::notifAmCb(void *arg, const void *header,
                          size_t length,
                          const ucp_am_recv_param_t *param)
 {
-    nixlSerDes ser_des;
-
-    std::string ser_str( (char*) data, length);
     nixlUcxEngine* engine = (nixlUcxEngine*) arg;
 
     // send_am should be forcing EAGER protocol
     NIXL_ASSERT(!(param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV));
     NIXL_ASSERT(header_length == 0) << "header_length " << header_length;
 
-    ser_des.importStr(ser_str);
-    std::string remote_name = ser_des.getStr("name");
-    std::string msg = ser_des.getStr("msg");
+    const std::string_view buf(static_cast<const char *>(data), length);
+    size_t offset = notif_serdes_hdr.size();
+    std::string_view remote_name;
+    std::string_view msg;
+    if (!buf.starts_with(notif_serdes_hdr) ||
+        !parseNotifField(buf, offset, notif_name_tag, remote_name) ||
+        !parseNotifField(buf, offset, notif_msg_tag, msg)) {
+        NIXL_ERROR << "Malformed notification of " << length << " bytes";
+        return UCS_OK;
+    }
 
-    engine->appendNotif(std::move(remote_name), std::move(msg));
+    engine->appendNotif(std::string(remote_name), std::string(msg));
     return UCS_OK;
 }
 

@@ -24,6 +24,7 @@
 #include "serdes/serdes.h"
 #include "common/backend.h"
 #include "common/configuration.h"
+#include "common/nixl_perf_trace.h"
 #include "common/nixl_log.h"
 
 #include <optional>
@@ -439,7 +440,15 @@ nixlUcxEngine::prepXferSgl(const nixl_meta_dlist_t &local,
     NIXL_ASSERT(local.descCount() == remote.descCount());
 
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
+    const uint64_t perf_start_ns = nixl::perf::monoNs();
     int_handle->sgl.emplace(local, remote, int_handle->getWorkerId(), 0, local.descCount());
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("ucx.prepSgl")
+            .add("bhandle", handle)
+            .add("descs", local.descCount())
+            .add("worker", int_handle->getWorkerId())
+            .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000);
+    }
     return NIXL_SUCCESS;
 }
 
@@ -455,7 +464,9 @@ nixlUcxEngine::sendXferSgl(nixlBackendReqH *handle) const {
     int_handle->init(conn, *ep);
 
     nixlUcxReq req;
+    const uint64_t perf_start_ns = nixl::perf::monoNs();
     const nixl_status_t post_ret = sgl.post(*ep, req);
+    const uint64_t perf_posted_ns = nixl::perf::monoNs();
     if (int_handle->append(post_ret, req) != NIXL_SUCCESS) {
         return post_ret;
     }
@@ -464,6 +475,16 @@ nixlUcxEngine::sendXferSgl(nixlBackendReqH *handle) const {
     const nixl_status_t flush_ret = ep->flushEp(flush_req);
     if (int_handle->append(flush_ret, flush_req) != NIXL_SUCCESS) {
         return flush_ret;
+    }
+
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("ucx.postSgl")
+            .add("bhandle", handle)
+            .add("worker", int_handle->getWorkerId())
+            .add("post_us", (perf_posted_ns - perf_start_ns) / 1000)
+            .add("flush_us", (nixl::perf::monoNs() - perf_posted_ns) / 1000)
+            .add("post_status", static_cast<int>(post_ret))
+            .add("flush_status", static_cast<int>(flush_ret));
     }
 
     return NIXL_SUCCESS;
@@ -488,7 +509,15 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
 #ifdef HAVE_UCX_SGL_API
     if (sglEnabled_ && operation == NIXL_WRITE) {
         if (!int_handle->sgl) {
+            const uint64_t perf_start_ns = nixl::perf::monoNs();
             int_handle->sgl.emplace(local, remote, worker_id, start_idx, end_idx);
+            if (nixl::perf::enabled()) {
+                nixl::perf::Event("ucx.prepSgl")
+                    .add("bhandle", handle)
+                    .add("descs", end_idx - start_idx)
+                    .add("worker", worker_id)
+                    .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000);
+            }
         }
         return sendXferSgl(handle);
     }
@@ -501,6 +530,7 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
     nixl_status_t status = NIXL_SUCCESS;
     nixlUcxReq pending_req = nullptr;
+    const uint64_t perf_start_ns = nixl::perf::monoNs();
 
     for (size_t i = start_idx; i < end_idx; ++i) {
         void *laddr = (void *)local[i].addr;
@@ -536,6 +566,15 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
         status = NIXL_IN_PROG;
     }
 
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("ucx.postRange")
+            .add("bhandle", handle)
+            .add("descs", end_idx - start_idx)
+            .add("worker", worker_id)
+            .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000)
+            .add("status", static_cast<int>(status));
+    }
+
     if (int_handle->append(status, pending_req) != NIXL_SUCCESS) {
         return status;
     }
@@ -564,6 +603,7 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
     const size_t rcnt = remote.descCount();
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
     nixl_status_t ret;
+    const uint64_t perf_start_ns = nixl::perf::monoNs();
 
     if (lcnt != rcnt) {
         NIXL_ERROR << "Local (" << lcnt << ") and remote (" << rcnt
@@ -593,6 +633,15 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
         }
     }
 
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("ucx.postXfer")
+            .add("bhandle", handle)
+            .add("descs", lcnt)
+            .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000)
+            .add("status", static_cast<int>(ret))
+            .add("notif_deferred", !int_handle->notif.empty());
+    }
+
     return ret;
 }
 
@@ -610,6 +659,9 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
         return handle_status;
     }
 
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("ucx.notifSend").add("bhandle", handle);
+    }
     nixlUcxReq req;
     const nixl_status_t status = sendNotif(std::move(int_handle->notif), int_handle->getEp(), &req);
     int_handle->notif.clear();
@@ -705,6 +757,9 @@ nixlUcxEngine::notifAmCb(void *arg, const void *header,
     ser_des.importStr(ser_str);
     std::string remote_name = ser_des.getStr("name");
     std::string msg = ser_des.getStr("msg");
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("ucx.notifRecv").add("from", remote_name).add("msg", msg);
+    }
 
     engine->appendNotif(std::move(remote_name), std::move(msg));
     return UCS_OK;

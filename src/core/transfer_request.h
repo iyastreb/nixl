@@ -99,6 +99,8 @@ private:
 
     nixl_xfer_telem_t telemetry;
     nixlTime::nixlDuration timer;
+    // steady_clock ns of the last post, for perf-trace completion latency.
+    uint64_t perfPostNs = 0;
 };
 
 struct nixlDlistH {

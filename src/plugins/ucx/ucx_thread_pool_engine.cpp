@@ -21,6 +21,7 @@
 #include "common/backend.h"
 #include "common/blocking_queue.h"
 #include "common/nixl_log.h"
+#include "common/nixl_perf_trace.h"
 
 #include <algorithm>
 #include <atomic>
@@ -466,9 +467,20 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
         const size_t chunk_start = i * batch_size / num_chunks;
         const size_t chunk_end = (i + 1) * batch_size / num_chunks;
+        const uint64_t perf_start_ns = nixl::perf::monoNs();
         try {
             const nixl_status_t ret = nixlUcxEngine::sendXferRange(
                 operation, local, remote, remote_agent, chunk_handle, chunk_start, chunk_end);
+            if (nixl::perf::enabled()) {
+                nixl::perf::Event("ucx.chunkPost")
+                    .add("bhandle", static_cast<nixlBackendReqH *>(comp_handle))
+                    .add("chunk", i)
+                    .add("start", chunk_start)
+                    .add("end", chunk_end)
+                    .add("worker", worker.getId())
+                    .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000)
+                    .add("status", static_cast<int>(ret));
+            }
             if (ret != NIXL_SUCCESS) {
                 chunk_handle->complete(ret);
             } else {

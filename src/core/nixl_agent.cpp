@@ -34,6 +34,7 @@
 #include "common/operators.h"
 #include "common/hw_info.h"
 #include "common/str_util.h"
+#include "common/nixl_perf_trace.h"
 #include "telemetry.h"
 #include "telemetry_event.h"
 #include "tracing/trace.h"
@@ -747,6 +748,7 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::makeXferReq", nixl::trace::Kind::Generic);
     NIXL_TRACE_ATTR(trace_span, "desc_count", static_cast<std::int64_t>(local_indices.size()));
+    const uint64_t perf_start_ns = nixl::perf::monoNs();
 
     nixl_opt_b_args_t  opt_args;
     nixl_status_t      ret;
@@ -922,6 +924,17 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
                         << "' failed to prepare the transfer request with status " << ret;
         data->addErrorTelemetry(ret);
         return ret;
+    }
+
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("nixl.makeXferReq")
+            .add("handle", handle.get())
+            .add("bhandle", handle->backendHandle)
+            .add("indices", desc_count)
+            .add("descs", handle->initiatorDescs.descCount())
+            .add("bytes", total_bytes)
+            .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000)
+            .add("notif", opt_args.hasNotif ? opt_args.notifMsg : std::string());
     }
 
     req_hndl = handle.release();
@@ -1120,6 +1133,7 @@ nixl_status_t
 nixlAgent::postXferReq(nixlXferReqH *req_hndl,
                        const nixl_opt_args_t* extra_params) const {
     nixl_opt_b_args_t opt_args;
+    const uint64_t perf_start_ns = nixl::perf::monoNs();
 
     opt_args.hasNotif = false;
 
@@ -1212,6 +1226,16 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
                                                   req_hndl->remoteAgent,
                                                   req_hndl->backendHandle,
                                                   &opt_args);
+    req_hndl->perfPostNs = nixl::perf::monoNs();
+    if (nixl::perf::enabled()) {
+        nixl::perf::Event("nixl.postXferReq")
+            .add("handle", req_hndl)
+            .add("bhandle", req_hndl->backendHandle)
+            .add("descs", req_hndl->initiatorDescs.descCount())
+            .add("status", static_cast<int>(req_hndl->status))
+            .add("us", (req_hndl->perfPostNs - perf_start_ns) / 1000)
+            .add("notif", opt_args.hasNotif ? opt_args.notifMsg : std::string());
+    }
 
     if (req_hndl->status < 0) {
         if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {
@@ -1267,6 +1291,13 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
             NIXL_TRACE_CORRELATION_SCOPE(data->tracer_.get(), req_hndl->traceCorrelationId64());
             NIXL_TRACE_MARK(
                 data->tracer_.get(), "nixl::xfer.complete", nixl::trace::Kind::Metadata);
+            if (nixl::perf::enabled()) {
+                nixl::perf::Event("nixl.xferDone")
+                    .add("handle", req_hndl)
+                    .add("bhandle", req_hndl->backendHandle)
+                    .add("us_since_post", (nixl::perf::monoNs() - req_hndl->perfPostNs) / 1000)
+                    .add("notif", req_hndl->hasNotif ? req_hndl->notifMsg : std::string());
+            }
         }
         if (data->telemetry_) {
             if (req_hndl->status == NIXL_SUCCESS) {
@@ -1397,6 +1428,21 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
 
     if (extra_params && extra_params->backends.size() > 0)
         delete backend_list;
+
+    if (nixl::perf::enabled() && !notif_map.empty()) {
+        size_t count = 0;
+        std::string msgs;
+        for (const auto &entry : notif_map) {
+            count += entry.second.size();
+            for (const auto &blob : entry.second) {
+                if (!msgs.empty()) {
+                    msgs += ';';
+                }
+                msgs += blob;
+            }
+        }
+        nixl::perf::Event("nixl.getNotifs").add("count", count).add("msgs", msgs);
+    }
 
     // If any backend had an error, it was already logged
     return bad_ret;

@@ -25,6 +25,7 @@
 
 #include <nixl_types.h>
 
+#include "common/configuration.h"
 #include "common/hw_info.h"
 #include "common/nixl_log.h"
 #include "config.h"
@@ -476,6 +477,16 @@ nixlUcxContext::nixlUcxContext(const std::vector<std::string> &devs,
     // NIXL only needs AMs to be visible after previous PUTs which RC already
     // provides without the need of strict order key.
     config.modify("RC_FENCE", "none");
+
+    // An SGL put posts one WQE per descriptor (a KV chunk is ~2*layers of
+    // them) and CQ credits are charged per WQE, so a burst of puts exhausts the
+    // default 256-entry send queue and lands in the UCP pending path, where
+    // transfers stalled and completion AMs were lost under load. Size both for
+    // a few dozen outstanding puts; explicit UCX_* settings still win.
+    if (nixl::config::getValueDefaulted("NIXL_UCX_SGL_ENABLE", false)) {
+        config.modify("RC_TX_QUEUE_LEN", "4096");
+        config.modify("RC_TX_CQ_LEN", "16384");
+    }
 
     if (ucpVersion_ >= UCP_VERSION(1, 21)) {
         config.modify("RC_GDA_NUM_CHANNELS", std::to_string(num_device_channels));

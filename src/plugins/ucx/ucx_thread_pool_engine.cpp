@@ -388,7 +388,9 @@ nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &in
           std::max<size_t>(num_threads,
                            nixl::getBackendParamDefaulted(init_params.customParams,
                                                           "split_batch_size",
-                                                          isSglEnabled() ? 4096u : 1024u))) {
+                                                          isSglEnabled() ? 4096u : 1024u))),
+      splitBatchBytes_(nixl::getBackendParamDefaulted(
+          init_params.customParams, "split_batch_bytes", 64u << 20)) {
 
     for (size_t i = 0; i < num_threads; ++i) {
         addWorker<nixlUcxDedicatedWorker>(this);
@@ -422,12 +424,23 @@ nixlUcxThreadPoolEngine::prepXfer(const nixl_xfer_op_t &operation,
                                   const std::string &remote_agent,
                                   nixlBackendReqH *&handle,
                                   const nixl_opt_b_args_t *opt_args) const {
-    size_t batch_size = local.descCount();
+    const size_t batch_size = local.descCount();
+    const size_t num_chunks = getDedicatedWorkers().size();
+    // Merged descriptors let a few entries carry gigabytes. Split those over the
+    // dedicated workers as well, so a later small transfer on the shared worker
+    // does not wait behind them in one QP's send queue.
+    size_t total_bytes = 0;
     if (batch_size < splitBatchSize_) {
+        for (int i = 0; i < local.descCount(); ++i) {
+            total_bytes += local[i].len;
+        }
+    }
+    const bool split = (batch_size >= splitBatchSize_ || total_bytes >= splitBatchBytes_) &&
+        (num_chunks > 0) && (batch_size >= num_chunks);
+    if (!split) {
         return nixlUcxEngine::prepXfer(operation, local, remote, remote_agent, handle, opt_args);
     }
 
-    const size_t num_chunks = getDedicatedWorkers().size();
     const auto comp_handle =
         new nixlUcxCompositeBackendReqH(getSharedWorker(getSharedWorkerId()).get(), num_chunks);
     NIXL_TRACE << "created " << *comp_handle;

@@ -20,7 +20,8 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
+
+#include "absl/container/inlined_vector.h"
 
 #include "backend/backend_engine.h"
 #include "common/nixl_log.h"
@@ -46,7 +47,8 @@ public:
     void
     init(const ucx_connection_ptr_t &conn, const nixlUcxEp &ep) {
         NIXL_ASSERT(requests_.empty());
-        requests_.reserve(max_requests);
+        NIXL_ASSERT(notifReq_ == nullptr);
+        notifStatus_ = NIXL_SUCCESS;
         conn_ = conn;
         ep_ = &ep;
     }
@@ -70,6 +72,41 @@ public:
         return NIXL_SUCCESS;
     }
 
+    /**
+     * @brief Flush the endpoint and track the flush. The pending notification, if any, is
+     *        sent when the flush completes, from whichever thread progresses the worker.
+     */
+    [[nodiscard]] nixl_status_t
+    flush() {
+        nixlUcxReq req;
+        nixl_status_t ret;
+
+        if (notif.empty()) {
+            ret = getEp().flushEp(req);
+        } else {
+            ret = getEp().flushEp(req, flushNotifCb, this);
+            if (ret == NIXL_SUCCESS) {
+                // Completed inline, no callback is invoked
+                sendNotif();
+            }
+        }
+
+        return append(ret, req);
+    }
+
+    /**
+     * @brief Send and track the pending notification over the bound endpoint
+     */
+    void
+    sendNotif() {
+        NIXL_ASSERT(notifReq_ == nullptr);
+        notifStatus_ = getEp().sendAm(nixl::ucx::am_cb_op_t::NOTIF_STR,
+                                    std::move(notif),
+                                    UCP_AM_SEND_FLAG_EAGER,
+                                    &notifReq_);
+        notif.clear();
+    }
+
     [[nodiscard]] virtual bool
     isComposite() const noexcept {
         return false;
@@ -87,17 +124,27 @@ public:
             }
             worker_->reqRelease(req);
         }
+        if (notifReq_ != nullptr) {
+            // Keep the AM callback enabled to release its payload if the send is still pending.
+            ucp_request_release(notifReq_);
+            notifReq_ = nullptr;
+        }
         reset();
     }
 
+    /**
+     * @brief Status of the posted requests
+     * @param progress Whether to progress the worker first
+     */
     [[nodiscard]] virtual nixl_status_t
-    status() {
+    status(bool progress = true) {
         if (requests_.empty()) {
-            /* No pending transmissions */
-            return NIXL_SUCCESS;
+            return notifStatus(progress);
         }
 
-        worker_->progressLoop();
+        if (progress) {
+            worker_->progressLoop();
+        }
 
         /* If last request is incomplete, return NIXL_IN_PROG early without
          * checking other requests */
@@ -129,7 +176,7 @@ public:
         }
 
         requests_.resize(incomplete_reqs);
-        return out_ret;
+        return (out_ret == NIXL_SUCCESS) ? notifStatus(false) : out_ret;
     }
 
     [[nodiscard]] nixlUcxWorker *
@@ -150,13 +197,45 @@ protected:
     }
 
 private:
-    // A post to a single endpoint issues at most three requests:
-    // one data request, one flush request, and one notification request.
-    static constexpr size_t max_requests = 3;
+    // Data and flush requests are tracked here; the notification has its own slot.
+    static constexpr size_t max_requests = 2;
+
+    [[nodiscard]] nixl_status_t
+    notifStatus(bool progress) {
+        // Releasing the flush request synchronizes with its callback before these reads.
+        if (notifStatus_ != NIXL_IN_PROG) {
+            return notifStatus_;
+        }
+
+        if (progress) {
+            worker_->progressLoop();
+        }
+
+        const nixl_status_t ret = nixl::ucx::ucsToNixlStatus(ucp_request_check_status(notifReq_));
+        if (ret != NIXL_IN_PROG) {
+            ucp_request_release(notifReq_);
+            notifReq_ = nullptr;
+            notifStatus_ = (ret == NIXL_SUCCESS) ? ret : checkConnection(ret);
+        }
+        return notifStatus_;
+    }
+
+    /**
+     * @brief Flush completion, runs inside ucp_worker_progress() on whichever thread
+     *        progresses the worker. The handle is alive: releasing it frees the flush request
+     *        with ucp_request_free(), which disables this callback for a request in flight.
+     */
+    static void
+    flushNotifCb(void *, ucs_status_t status, void *user_data) {
+        if (status == UCS_OK) {
+            static_cast<nixlUcxBackendReqH *>(user_data)->sendNotif();
+        }
+    }
 
     void
     reset() noexcept {
         requests_.clear();
+        notifStatus_ = NIXL_SUCCESS;
         conn_.reset();
         ep_ = nullptr;
     }
@@ -173,7 +252,9 @@ private:
     ucx_connection_ptr_t conn_;
     // Resolved endpoint over which data and notifications are sent.
     const nixlUcxEp *ep_ = nullptr;
-    std::vector<nixlUcxReq> requests_;
+    absl::InlinedVector<nixlUcxReq, max_requests> requests_;
+    nixlUcxReq notifReq_ = nullptr;
+    nixl_status_t notifStatus_ = NIXL_SUCCESS;
     nixlUcxWorker *worker_ = nullptr;
 };
 

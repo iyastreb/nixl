@@ -104,8 +104,13 @@ public:
                  std::chrono::microseconds &duration,
                  std::chrono::microseconds &err_margin,
                  nixl_cost_t &method);
+    /**
+     * @brief Flush the endpoint
+     * @param req Receives the UCX request of an in-progress flush
+     * @param cb  Optional completion callback, invoked only for an in-progress flush
+     */
     nixl_status_t
-    flushEp(nixlUcxReq &req);
+    flushEp(nixlUcxReq &req, ucp_send_nbx_callback_t cb = nullptr, void *user_data = nullptr) const;
 
 #ifdef HAVE_UCX_SGL_API
     /* Scatter-gather list (SGL) operations */

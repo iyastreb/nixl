@@ -241,6 +241,15 @@ protected:
     virtual void
     appendNotif(std::string &&remote_name, std::string &&msg);
 
+    /**
+     * @brief Whether postXfer() and checkXfer() progress the worker; not needed when a
+     *        progress thread does it, the request status is then a lock-free read
+     */
+    [[nodiscard]] virtual bool
+    inlineProgress() const noexcept {
+        return true;
+    }
+
     virtual nixl_status_t
     sendXferRange(const nixl_xfer_op_t &operation,
                   const nixl_meta_dlist_t &local,

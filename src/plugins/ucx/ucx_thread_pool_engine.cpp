@@ -125,14 +125,15 @@ public:
               nixlUcxWorker *worker) {
         NIXL_ASSERT(sharedState_.get() == nullptr);
         sharedState_ = shared_state;
+        dataCompleted_ = false;
         setWorker(worker);
     }
 
-    void
+    bool
     complete(nixl_status_t status);
 
     [[nodiscard]] nixl_status_t
-    status() override;
+    status(bool progress = true) override;
 
     friend std::ostream &
     operator<<(std::ostream &os, const nixlUcxChunkBackendReqH &chunk) {
@@ -144,6 +145,7 @@ public:
 
 private:
     std::shared_ptr<nixlUcxBackendSharedState> sharedState_;
+    bool dataCompleted_ = false;
 };
 
 /*
@@ -153,10 +155,15 @@ private:
  */
 struct nixlUcxBackendSharedState {
     std::atomic<nixl_status_t> status;
+    // Chunks that have not completed yet
     std::atomic<size_t> pendingReqs;
+    // Chunks whose data transfer has not completed yet
+    std::atomic<size_t> pendingXfers;
+    // Notification sent by the chunk whose data transfer completes last, empty if none
+    std::string notif;
     std::vector<nixlUcxChunkBackendReqH> chunks;
 
-    nixlUcxBackendSharedState() : status(NIXL_SUCCESS), pendingReqs(0) {}
+    nixlUcxBackendSharedState() : status(NIXL_SUCCESS), pendingReqs(0), pendingXfers(0) {}
 
     friend std::ostream &
     operator<<(std::ostream &os, const nixlUcxBackendSharedState &state) {
@@ -165,27 +172,52 @@ struct nixlUcxBackendSharedState {
     }
 };
 
-void
-nixlUcxChunkBackendReqH::complete(const nixl_status_t status) {
+bool
+nixlUcxChunkBackendReqH::complete(nixl_status_t status) {
     NIXL_ASSERT(sharedState_.get() != nullptr);
     if (status != NIXL_SUCCESS) {
         nixlUcxBackendReqH::release();
         sharedState_->status.store(status);
     }
+
+    // The chunk completing the data transfer last sends the notification over its own
+    // endpoint, before the request is reported complete to the user. The release/acquire
+    // pair on the counter makes the status stored by the other chunks visible.
+    if (!dataCompleted_) {
+        dataCompleted_ = true;
+        if ((sharedState_->pendingXfers.fetch_sub(1, std::memory_order_acq_rel) == 1) &&
+            !sharedState_->notif.empty()) {
+            if (sharedState_->status.load() == NIXL_SUCCESS) {
+                notif = std::move(sharedState_->notif);
+                sendNotif();
+                status = nixlUcxBackendReqH::status(false);
+            }
+            sharedState_->notif.clear();
+            if (status == NIXL_IN_PROG) {
+                return false;
+            }
+            if (status != NIXL_SUCCESS) {
+                nixlUcxBackendReqH::release();
+                sharedState_->status.store(status);
+            }
+        }
+    }
+
     sharedState_->pendingReqs.fetch_sub(1);
     NIXL_TRACE << *this << " completed with status: " << status << ", " << *sharedState_;
     setWorker(nullptr);
     sharedState_.reset();
+    return true;
 }
 
 nixl_status_t
-nixlUcxChunkBackendReqH::status() {
+nixlUcxChunkBackendReqH::status(const bool progress) {
     // First check if entire request was cancelled or failed
     const nixl_status_t status = sharedState_->status.load();
     if (status != NIXL_SUCCESS) {
         return status;
     }
-    return nixlUcxBackendReqH::status();
+    return nixlUcxBackendReqH::status(progress);
 }
 
 /*
@@ -211,6 +243,9 @@ public:
     startXfer() {
         NIXL_ASSERT(sharedState_->pendingReqs.load() == 0);
         sharedState_->status.store(NIXL_SUCCESS);
+        sharedState_->notif = std::move(notif);
+        notif.clear();
+        sharedState_->pendingXfers.store(getNumChunks());
         sharedState_->pendingReqs.store(getNumChunks());
     }
 
@@ -241,14 +276,16 @@ public:
     }
 
     [[nodiscard]] nixl_status_t
-    status() override {
-        getWorker()->progressLoop();
+    status(bool progress = true) override {
+        if (progress) {
+            getWorker()->progressLoop();
+        }
 
         if (sharedState_->pendingReqs.load()) {
             return NIXL_IN_PROG;
         }
 
-        const nixl_status_t status = nixlUcxBackendReqH::status();
+        const nixl_status_t status = nixlUcxBackendReqH::status(progress);
         if (status != NIXL_SUCCESS) {
             return status;
         }
@@ -320,8 +357,11 @@ protected:
                 if (status != NIXL_IN_PROG) {
                     NIXL_TRACE << "dedicated " << *this << " completing " << *(*it)
                                << " with status: " << status;
-                    (*it)->complete(status);
-                    it = requests_.erase(it);
+                    if ((*it)->complete(status)) {
+                        it = requests_.erase(it);
+                    } else {
+                        ++it;
+                    }
                 } else {
                     ++it;
                 }
@@ -453,7 +493,8 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
     const auto comp_handle = static_cast<nixlUcxCompositeBackendReqH *>(int_handle);
     comp_handle->startXfer();
 
-    // Notifications of the composite request are sent over its shared worker
+    // The composite request is bound to the connection to keep it alive and to check its
+    // state; the notification is sent by the chunk that completes last over its own endpoint
     const ucx_connection_ptr_t &conn =
         static_cast<nixlUcxPublicMetadata *>(remote[start_idx].metadataP)->conn;
     comp_handle->init(conn, *conn->getEp(comp_handle->getWorkerId()));

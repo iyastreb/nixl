@@ -460,13 +460,7 @@ nixlUcxEngine::sendXferSgl(nixlBackendReqH *handle) const {
         return post_ret;
     }
 
-    nixlUcxReq flush_req;
-    const nixl_status_t flush_ret = ep->flushEp(flush_req);
-    if (int_handle->append(flush_ret, flush_req) != NIXL_SUCCESS) {
-        return flush_ret;
-    }
-
-    return NIXL_SUCCESS;
+    return int_handle->flush();
 }
 #endif
 
@@ -544,13 +538,7 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
      * Flush keeps int_handle non-empty until the operation is actually
      * completed, which can happen after local requests completion.
      */
-    nixlUcxReq flush_req;
-    const nixl_status_t flush_ret = ep->flushEp(flush_req);
-    if (int_handle->append(flush_ret, flush_req) != NIXL_SUCCESS) {
-        return flush_ret;
-    }
-
-    return NIXL_SUCCESS;
+    return int_handle->flush();
 }
 
 nixl_status_t
@@ -573,52 +561,25 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
 
     // TODO: assert that handle is empty/completed, as we can't post request before completion
 
+    // The notification is sent by the completion of the transfer, which may run on another
+    // thread as soon as the data is posted, so it is prepared before the post
+    if (opt_args && opt_args->hasNotif) {
+        int_handle->notif = buildNotif(opt_args->notifMsg);
+    } else {
+        int_handle->notif.clear();
+    }
+
     ret = sendXferRange(operation, local, remote, remote_agent, handle, 0, lcnt);
     if (ret != NIXL_SUCCESS) {
         return ret;
     }
 
-    ret = int_handle->status();
-    if (opt_args && opt_args->hasNotif) {
-        if (ret == NIXL_SUCCESS) {
-            nixlUcxReq req;
-            ret = notifSendPriv(remote_agent, opt_args->notifMsg, int_handle->getEp(), &req);
-            if (int_handle->append(ret, req) != NIXL_SUCCESS) {
-                return ret;
-            }
-
-            ret = int_handle->status();
-        } else if (ret == NIXL_IN_PROG) {
-            int_handle->notif = buildNotif(opt_args->notifMsg);
-        }
-    }
-
-    return ret;
+    return int_handle->status(inlineProgress());
 }
 
 nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
 {
-    const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
-    const nixl_status_t handle_status = int_handle->status();
-
-    if ((handle_status == NIXL_IN_PROG) || int_handle->notif.empty()) {
-        return handle_status;
-    }
-
-    if (handle_status != NIXL_SUCCESS) [[unlikely]] {
-        int_handle->notif.clear();
-        return handle_status;
-    }
-
-    nixlUcxReq req;
-    const nixl_status_t status = sendNotif(std::move(int_handle->notif), int_handle->getEp(), &req);
-    int_handle->notif.clear();
-
-    if (int_handle->append(status, req) != NIXL_SUCCESS) {
-        return status;
-    }
-
-    return int_handle->status();
+    return static_cast<nixlUcxBackendReqH *>(handle)->status(inlineProgress());
 }
 
 nixl_status_t nixlUcxEngine::releaseReqH(nixlBackendReqH* handle) const

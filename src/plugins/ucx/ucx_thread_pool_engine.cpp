@@ -29,6 +29,9 @@
 #include <latch>
 #include <limits>
 #include <ostream>
+#include <string>
+
+#include <unistd.h>
 
 #include "absl/container/inlined_vector.h"
 
@@ -501,13 +504,26 @@ nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &in
       splitBatchByBytes_(nixl::getBackendParamDefaulted(
           init_params.customParams, "split_batch_by_bytes", false)) {
 
+    const bool log_thread_pool_config = nixl::getBackendParamDefaulted(
+        init_params.customParams, "log_thread_pool_config", false);
     for (size_t i = 0; i < num_threads; ++i) {
         addWorker<nixlUcxDedicatedWorker>(this);
     }
-    NIXL_INFO << "UCX thread pool: num_threads=" << getDedicatedWorkers().size()
-              << " split_batch_size=" << splitBatchSize_
-              << " split_batch_bytes=" << splitBatchBytes_
-              << " split_batch_by_bytes=" << static_cast<int>(splitBatchByBytes_);
+    if (log_thread_pool_config) {
+        const std::string line =
+            "UCX thread pool: num_threads=" + std::to_string(getDedicatedWorkers().size()) +
+            " split_batch_size=" + std::to_string(splitBatchSize_) +
+            " split_batch_bytes=" + std::to_string(splitBatchBytes_) +
+            " split_batch_by_bytes=" + std::to_string(static_cast<int>(splitBatchByBytes_)) +
+            " pid=" + std::to_string(::getpid()) + "\n";
+        [[maybe_unused]] const auto bytes_written =
+            ::write(STDERR_FILENO, line.data(), line.size());
+    } else {
+        NIXL_INFO << "UCX thread pool: num_threads=" << getDedicatedWorkers().size()
+                  << " split_batch_size=" << splitBatchSize_
+                  << " split_batch_bytes=" << splitBatchBytes_
+                  << " split_batch_by_bytes=" << static_cast<int>(splitBatchByBytes_);
+    }
 }
 
 nixlUcxThreadPoolEngine::~nixlUcxThreadPoolEngine() {

@@ -132,6 +132,40 @@ public:
     void
     complete(nixl_status_t status);
 
+    void
+    traceStart(const nixlBackendReqH *parent,
+               size_t chunk,
+               const nixl_meta_dlist_t &local,
+               size_t start,
+               size_t end) {
+        perfParent_ = parent;
+        perfChunk_ = chunk;
+        perfStart_ = start;
+        perfEnd_ = end;
+        perfBytes_ = 0;
+        for (size_t i = start; i < end; ++i) {
+            perfBytes_ += local[i].len;
+        }
+        perfPostNs_ = 0;
+        perfStartNs_ = nixl::perf::monoNs();
+    }
+
+    void
+    tracePost(nixl_status_t status) {
+        perfPostNs_ = nixl::perf::monoNs();
+        nixl::perf::Event("ucx.chunkPost")
+            .add("bhandle", perfParent_)
+            .add("chunk_handle", this)
+            .add("chunk", perfChunk_)
+            .add("start", perfStart_)
+            .add("end", perfEnd_)
+            .add("worker", getWorkerId())
+            .add("bytes", perfBytes_)
+            .add("post_start_ns", perfStartNs_)
+            .add("us", (perfPostNs_ - perfStartNs_) / 1000)
+            .add("status", static_cast<int>(status));
+    }
+
     [[nodiscard]] nixl_status_t
     status() override;
 
@@ -145,6 +179,13 @@ public:
 
 private:
     std::shared_ptr<nixlUcxBackendSharedState> sharedState_;
+    const nixlBackendReqH *perfParent_ = nullptr;
+    size_t perfChunk_ = 0;
+    size_t perfStart_ = 0;
+    size_t perfEnd_ = 0;
+    size_t perfBytes_ = 0;
+    uint64_t perfStartNs_ = 0;
+    uint64_t perfPostNs_ = 0;
 };
 
 /*
@@ -169,6 +210,21 @@ struct nixlUcxBackendSharedState {
 void
 nixlUcxChunkBackendReqH::complete(const nixl_status_t status) {
     NIXL_ASSERT(sharedState_.get() != nullptr);
+    if (nixl::perf::enabled()) {
+        const uint64_t done_ns = nixl::perf::monoNs();
+        nixl::perf::Event event("ucx.chunkDone");
+        event.add("bhandle", perfParent_)
+            .add("chunk_handle", this)
+            .add("chunk", perfChunk_)
+            .add("worker", getWorkerId())
+            .add("bytes", perfBytes_)
+            .add("post_start_ns", perfStartNs_)
+            .add("us_since_start", (done_ns - perfStartNs_) / 1000)
+            .add("status", static_cast<int>(status));
+        if (perfPostNs_ != 0) {
+            event.add("us_since_post", (done_ns - perfPostNs_) / 1000);
+        }
+    }
     if (status != NIXL_SUCCESS) {
         nixlUcxBackendReqH::release();
         sharedState_->status.store(status);
@@ -480,19 +536,14 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
 
         const size_t chunk_start = i * batch_size / num_chunks;
         const size_t chunk_end = (i + 1) * batch_size / num_chunks;
-        const uint64_t perf_start_ns = nixl::perf::monoNs();
+        if (nixl::perf::enabled()) {
+            chunk_handle->traceStart(comp_handle, i, local, chunk_start, chunk_end);
+        }
         try {
             const nixl_status_t ret = nixlUcxEngine::sendXferRange(
                 operation, local, remote, remote_agent, chunk_handle, chunk_start, chunk_end);
             if (nixl::perf::enabled()) {
-                nixl::perf::Event("ucx.chunkPost")
-                    .add("bhandle", static_cast<nixlBackendReqH *>(comp_handle))
-                    .add("chunk", i)
-                    .add("start", chunk_start)
-                    .add("end", chunk_end)
-                    .add("worker", worker.getId())
-                    .add("us", (nixl::perf::monoNs() - perf_start_ns) / 1000)
-                    .add("status", static_cast<int>(ret));
+                chunk_handle->tracePost(ret);
             }
             if (ret != NIXL_SUCCESS) {
                 chunk_handle->complete(ret);

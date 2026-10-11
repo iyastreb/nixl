@@ -52,6 +52,7 @@ private:
 
     const size_t splitBatchSize_;
     const size_t splitBatchBytes_;
+    const bool splitBatchByBytes_;
 };
 
 #endif // NIXL_SRC_PLUGINS_UCX_UCX_THREAD_POOL_ENGINE_H

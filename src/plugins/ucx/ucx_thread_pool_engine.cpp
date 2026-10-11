@@ -27,6 +27,7 @@
 #include <atomic>
 #include <exception>
 #include <latch>
+#include <limits>
 #include <ostream>
 
 #include "absl/container/inlined_vector.h"
@@ -36,6 +37,56 @@
 namespace {
 
 constexpr size_t inline_worker_tasks = 16;
+
+absl::InlinedVector<size_t, inline_worker_tasks + 1>
+byteBalancedChunkBounds(const nixl_meta_dlist_t &local, size_t num_chunks) {
+    const size_t batch_size = local.descCount();
+    if (num_chunks <= 1 || batch_size <= num_chunks) {
+        return {};
+    }
+
+    size_t remaining_bytes = 0;
+    for (size_t i = 0; i < batch_size; ++i) {
+        if (local[i].len > std::numeric_limits<size_t>::max() - remaining_bytes) {
+            return {};
+        }
+        remaining_bytes += local[i].len;
+    }
+    if (remaining_bytes == 0) {
+        return {};
+    }
+
+    absl::InlinedVector<size_t, inline_worker_tasks + 1> bounds;
+    bounds.reserve(num_chunks + 1);
+    bounds.push_back(0);
+    size_t begin = 0;
+    for (size_t i = 0; i + 1 < num_chunks; ++i) {
+        const size_t chunks_left = num_chunks - i;
+        const size_t limit = batch_size - (chunks_left - 1);
+        size_t end = begin + 1;
+        size_t chunk_bytes = local[begin].len;
+        if (remaining_bytes == 0) {
+            end = begin + (batch_size - begin) / chunks_left;
+        } else {
+            const size_t target = remaining_bytes / chunks_left;
+            // Choose the nearest byte boundary while leaving every later chunk nonempty.
+            while (end < limit && chunk_bytes < target) {
+                const size_t gap = target - chunk_bytes;
+                const size_t next_bytes = local[end].len;
+                if (next_bytes > gap && next_bytes - gap > gap) {
+                    break;
+                }
+                chunk_bytes += next_bytes;
+                ++end;
+            }
+        }
+        bounds.push_back(end);
+        begin = end;
+        remaining_bytes -= chunk_bytes;
+    }
+    bounds.push_back(batch_size);
+    return bounds;
+}
 
 class nixlUcxDedicatedWorker;
 struct nixlUcxBackendSharedState;
@@ -446,7 +497,9 @@ nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &in
                                                           "split_batch_size",
                                                           isSglEnabled() ? 4096u : 1024u))),
       splitBatchBytes_(nixl::getBackendParamDefaulted(
-          init_params.customParams, "split_batch_bytes", 64u << 20)) {
+          init_params.customParams, "split_batch_bytes", 64u << 20)),
+      splitBatchByBytes_(nixl::getBackendParamDefaulted(
+          init_params.customParams, "split_batch_by_bytes", false)) {
 
     for (size_t i = 0; i < num_threads; ++i) {
         addWorker<nixlUcxDedicatedWorker>(this);
@@ -519,6 +572,13 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
     }
 
     const auto comp_handle = static_cast<nixlUcxCompositeBackendReqH *>(int_handle);
+    const size_t batch_size = local.descCount();
+    const size_t num_chunks = comp_handle->getNumChunks();
+    NIXL_ASSERT(start_idx == 0 && end_idx == batch_size);
+    absl::InlinedVector<size_t, inline_worker_tasks + 1> chunk_bounds;
+    if (splitBatchByBytes_) {
+        chunk_bounds = byteBalancedChunkBounds(local, num_chunks);
+    }
     comp_handle->startXfer();
 
     // Notifications of the composite request are sent over its shared worker
@@ -526,16 +586,16 @@ nixlUcxThreadPoolEngine::sendXferRange(const nixl_xfer_op_t &operation,
         static_cast<nixlUcxPublicMetadata *>(remote[start_idx].metadataP)->conn;
     comp_handle->init(conn, *conn->getEp(comp_handle->getWorkerId()));
 
-    const size_t batch_size = local.descCount();
-    const size_t num_chunks = comp_handle->getNumChunks();
     NIXL_TRACE << "sending " << *comp_handle;
 
     const nixl_status_t status = execute([&](nixlUcxDedicatedWorker &worker) {
         const size_t i = worker.getId() - getSharedWorkersSize();
         nixlUcxChunkBackendReqH *chunk_handle = comp_handle->startChunk(i, &worker);
 
-        const size_t chunk_start = i * batch_size / num_chunks;
-        const size_t chunk_end = (i + 1) * batch_size / num_chunks;
+        const size_t chunk_start =
+            chunk_bounds.empty() ? i * batch_size / num_chunks : chunk_bounds[i];
+        const size_t chunk_end =
+            chunk_bounds.empty() ? (i + 1) * batch_size / num_chunks : chunk_bounds[i + 1];
         if (nixl::perf::enabled()) {
             chunk_handle->traceStart(comp_handle, i, local, chunk_start, chunk_end);
         }

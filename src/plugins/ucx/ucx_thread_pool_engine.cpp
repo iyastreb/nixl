@@ -504,6 +504,10 @@ nixlUcxThreadPoolEngine::nixlUcxThreadPoolEngine(const nixlBackendInitParams &in
     for (size_t i = 0; i < num_threads; ++i) {
         addWorker<nixlUcxDedicatedWorker>(this);
     }
+    NIXL_INFO << "UCX thread pool: num_threads=" << getDedicatedWorkers().size()
+              << " split_batch_size=" << splitBatchSize_
+              << " split_batch_bytes=" << splitBatchBytes_
+              << " split_batch_by_bytes=" << static_cast<int>(splitBatchByBytes_);
 }
 
 nixlUcxThreadPoolEngine::~nixlUcxThreadPoolEngine() {

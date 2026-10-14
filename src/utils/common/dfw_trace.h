@@ -26,7 +26,7 @@ struct Event {
     uint64_t start = 0, end = 0;
     uint64_t handle = 0, peer = 0, descs = 0, bytes = 0;
     uint64_t count = 0, value = 0, lock_ns = 0;
-    uint64_t cpu_ns = 0;
+    uint64_t cpu_ns = 0, completed_ns = 0;
     int status = 0;
 };
 

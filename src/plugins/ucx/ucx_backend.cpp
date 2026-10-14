@@ -373,6 +373,11 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
 
     const size_t worker_id = getSharedWorkerId(opt_args);
     handle = reqHPool_.get(getSharedWorker(worker_id).get()).release();
+    if (dfw.start) {
+        const auto traced_handle = static_cast<nixlUcxBackendReqH *>(handle);
+        traced_handle->dfwPoll = {};
+        traced_handle->dfwFlushDone.store(0, std::memory_order_relaxed);
+    }
     dfw.handle = reinterpret_cast<uint64_t>(handle);
     dfw.value = worker_id;
 
@@ -643,6 +648,7 @@ nixl_status_t nixlUcxEngine::releaseReqH(nixlBackendReqH* handle) const
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
     nixl::dfw::Scope dfw("ucx.release", handle);
     if (dfw.start) {
+        dfw.completed_ns = int_handle->dfwFlushDone.load(std::memory_order_acquire);
         dfw.count = int_handle->dfwPoll.count;
         dfw.value = int_handle->dfwPoll.progress_ns;
         dfw.bytes = 0;

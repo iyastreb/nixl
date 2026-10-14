@@ -36,6 +36,7 @@ class nixlUcxBackendReqH : public nixlBackendReqH {
 public:
     std::string notif;
     nixl::dfw::PollStats dfwPoll;
+    std::atomic<uint64_t> dfwFlushDone{0};
     std::string notifMsg;
     nixl::trace::TraceContext notifTraceContext;
     bool notifPending = false;
@@ -100,13 +101,15 @@ public:
     flush() {
         nixl::dfw::Scope dfw("ucx.flush", this);
         nixlUcxReq req = nullptr;
-        const nixl_status_t status = ep_->flushEp(req);
+        if (dfw.start) dfwFlushDone.store(0, std::memory_order_relaxed);
+        const nixl_status_t status = ep_->flushEp(req, dfw.start ? &dfwFlushDone : nullptr);
         return append(status, req);
     }
 
     [[nodiscard]] nixl_status_t
     sendNotif() {
         nixl::dfw::Scope dfw("ucx.notif_send", this);
+        if (dfw.start) dfw.completed_ns = dfwFlushDone.load(std::memory_order_acquire);
         nixlUcxReq req = nullptr;
         const nixl_status_t status = getEp().sendAm(
             nixl::ucx::am_cb_op_t::NOTIF_STR, notif, UCP_AM_SEND_FLAG_EAGER, &req);

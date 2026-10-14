@@ -51,8 +51,16 @@ void flush() noexcept {
     if (!enabled()) return;
     auto &out = writer();
     if (out.file) {
+        const auto start = now();
         std::fflush(out.file);
         out.last_flush = now();
+        std::fprintf(out.file,
+            "{\"event\":\"trace.flush\",\"pid\":%ld,\"tid\":%ld,"
+            "\"start_ns\":%llu,\"end_ns\":%llu,\"handle\":0,\"peer\":0,"
+            "\"descs\":0,\"bytes\":0,\"count\":0,\"value\":0,"
+            "\"lock_ns\":0,\"cpu_ns\":0,\"completed_ns\":0,\"status\":0}\n",
+            out.pid, out.tid, (unsigned long long)start,
+            (unsigned long long)out.last_flush);
     }
 }
 
@@ -66,15 +74,14 @@ void emit(const Event &e) noexcept {
         "{\"event\":\"%s\",\"pid\":%ld,\"tid\":%ld,\"start_ns\":%llu,"
         "\"end_ns\":%llu,\"real_ns\":%llu,\"handle\":%llu,\"peer\":%llu,"
         "\"descs\":%llu,\"bytes\":%llu,\"count\":%llu,\"value\":%llu,"
-        "\"lock_ns\":%llu,\"cpu_ns\":%llu,\"status\":%d}\n",
+        "\"lock_ns\":%llu,\"cpu_ns\":%llu,\"completed_ns\":%llu,\"status\":%d}\n",
         e.name, out.pid, out.tid, (unsigned long long)e.start, (unsigned long long)e.end,
         (unsigned long long)real_ns, (unsigned long long)e.handle, (unsigned long long)e.peer,
         (unsigned long long)e.descs, (unsigned long long)e.bytes, (unsigned long long)e.count,
         (unsigned long long)e.value, (unsigned long long)e.lock_ns,
-        (unsigned long long)e.cpu_ns, e.status);
+        (unsigned long long)e.cpu_ns, (unsigned long long)e.completed_ns, e.status);
     if ((++out.count % 32 == 0) || e.end - out.last_flush >= 100000000ULL) {
-        std::fflush(out.file);
-        out.last_flush = e.end;
+        flush();
     }
 }
 } // namespace nixl::dfw

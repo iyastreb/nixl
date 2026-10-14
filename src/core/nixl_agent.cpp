@@ -900,6 +900,10 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
                                         desc_count,
                                         remote_side.remoteSectionRef,
                                         nixl::trace::TraceContext{data->tracer_.get()});
+    if (dfw_allocate.start) {
+        handle->dfwPoll = {};
+        handle->dfwPostStart = 0;
+    }
     dfw_allocate.handle = reinterpret_cast<uint64_t>(handle.get());
     dfw_allocate.finish();
     nixl::dfw::Scope dfw_descs("core.descriptors", handle.get());
@@ -1085,6 +1089,10 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                                         local_descs.descCount(),
                                         rem_sec_it->second,
                                         nixl::trace::TraceContext{data->tracer_.get()});
+    if (dfw_allocate.start) {
+        handle->dfwPoll = {};
+        handle->dfwPostStart = 0;
+    }
     dfw_allocate.handle = reinterpret_cast<uint64_t>(handle.get());
     dfw_allocate.finish();
     nixl::dfw::Scope dfw_descs("core.descriptors", handle.get());

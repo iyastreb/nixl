@@ -32,11 +32,21 @@
 #include "ucx_sgl.h"
 #include "ucx_utils.h"
 
+struct nixlUcxFlushStamp : std::atomic<uint64_t> {
+    nixlUcxFlushStamp() noexcept : std::atomic<uint64_t>(0) {}
+    nixlUcxFlushStamp(nixlUcxFlushStamp &&other) noexcept
+        : std::atomic<uint64_t>(other.load(std::memory_order_relaxed)) {}
+    nixlUcxFlushStamp &operator=(nixlUcxFlushStamp &&other) noexcept {
+        store(other.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        return *this;
+    }
+};
+
 class nixlUcxBackendReqH : public nixlBackendReqH {
 public:
     std::string notif;
     nixl::dfw::PollStats dfwPoll;
-    std::atomic<uint64_t> dfwFlushDone{0};
+    nixlUcxFlushStamp dfwFlushDone;
     std::string notifMsg;
     nixl::trace::TraceContext notifTraceContext;
     bool notifPending = false;

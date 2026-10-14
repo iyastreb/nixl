@@ -452,11 +452,6 @@ public:
         descs.clear();
     }
 
-    inline void
-    setType(nixl_mem_t type) {
-        this->type = type;
-    }
-
     /**
      * @brief     Add Descriptors to descriptor list
      */

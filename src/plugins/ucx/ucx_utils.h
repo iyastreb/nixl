@@ -19,7 +19,6 @@
 
 #include <atomic>
 #include <memory>
-#include <string_view>
 #include <type_traits>
 
 extern "C" {
@@ -69,14 +68,14 @@ public:
     operator=(const nixlUcxEp &) = delete;
 
     /**
-     * @brief Send an active message with owned storage for pending sends
-     * @param payload Data valid until this call returns
+     * @brief Send an active message that owns its payload
+     * @param payload Data released once the send completes
      * @param req Receives the UCX request of an in-progress send; if null, the request is
      *            released on completion
      */
     nixl_status_t
     sendAm(nixl::ucx::am_cb_op_t msg_id,
-           std::string_view payload,
+           std::string &&payload,
            uint32_t flags,
            nixlUcxReq *req = nullptr) const;
 

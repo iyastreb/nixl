@@ -25,12 +25,10 @@
 #include <chrono>
 #include <poll.h>
 #include <optional>
-#include <string_view>
 #include <utility>
 
 #include "backend/backend_engine.h"
 #include "tracing/trace_context.h"
-#include "common/nixl_memory_pool.h"
 
 #include "mem_list.h"
 #include "rkey.h"
@@ -104,8 +102,6 @@ public:
 private:
     const std::vector<nixl::ucx::rkey> rkeys_;
 };
-
-class nixlUcxBackendReqH;
 
 class nixlUcxEngine : public nixlBackendEngine {
 public:
@@ -343,8 +339,6 @@ private:
 
     // Map of agent name to saved nixlUcxConnection info
     std::unordered_map<std::string, ucx_connection_ptr_t> remoteConnMap;
-
-    mutable nixlMemoryPool<nixlUcxBackendReqH> reqHPool_;
 };
 
 #endif

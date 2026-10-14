@@ -25,13 +25,6 @@ nixlSerDes::nixlSerDes()
       des_offset(workingStr.size()),
       mode(SERIALIZE) {}
 
-void
-nixlSerDes::reset() {
-    workingStr = "nixlSerDes|";
-    des_offset = workingStr.size();
-    mode = SERIALIZE;
-}
-
 std::string nixlSerDes::_bytesToString(const void *buf, ssize_t size) {
     return std::string(reinterpret_cast<const char *>(buf), size);
 }
@@ -184,19 +177,13 @@ nixlSerDes::exportMoveStr() && {
 }
 
 nixl_status_t nixlSerDes::importStr(const std::string &sdbuf) {
-    return importStr(sdbuf.data(), sdbuf.size());
-}
-
-nixl_status_t
-nixlSerDes::importStr(const char *data, size_t length) {
-    const std::string_view sdbuf(data, length);
 
     if(sdbuf.compare(0, 11, "nixlSerDes|") != 0){
         NIXL_ERROR << "Deserialization failed, missing nixlSerDes tag";
         return NIXL_ERR_MISMATCH;
     }
 
-    workingStr.assign(data, length);
+    workingStr = sdbuf;
     mode = DESERIALIZE;
     des_offset = 11;
 

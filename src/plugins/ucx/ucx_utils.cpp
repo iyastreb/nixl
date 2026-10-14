@@ -28,7 +28,6 @@
 
 #include "common/hw_info.h"
 #include "common/nixl_log.h"
-#include "common/nixl_memory_pool.h"
 #include "config.h"
 #include "serdes/serdes.h"
 
@@ -166,20 +165,8 @@ nixlUcxEp::~nixlUcxEp() {
  * Active message handling
  * =========================================== */
 
-struct nixlUcxAmSendContext {
-    std::string payload;
-    bool releaseRequest;
-
-    nixlUcxAmSendContext(std::string_view data, bool release)
-        : payload(data),
-          releaseRequest(release) {}
-
-    void
-    reset(std::string_view data, bool release) {
-        payload.assign(data);
-        releaseRequest = release;
-    }
-};
+// Payload of an in-flight AM send and whether to release the request on completion
+using nixl_ucx_am_send_ctx_t = std::pair<std::string, bool>;
 
 void
 nixlUcxEp::sendAmCallback(void *request, ucs_status_t status, void *user_data) {
@@ -187,17 +174,16 @@ nixlUcxEp::sendAmCallback(void *request, ucs_status_t status, void *user_data) {
         NIXL_ERROR << "UCX AM send failed with status " << status << " ("
                    << ucs_status_string(status) << ")";
     }
-    std::unique_ptr<nixlUcxAmSendContext> ctx(static_cast<nixlUcxAmSendContext *>(user_data));
-    if (ctx->releaseRequest) {
+    const std::unique_ptr<nixl_ucx_am_send_ctx_t> ctx(
+        static_cast<nixl_ucx_am_send_ctx_t *>(user_data));
+    if (ctx->second) {
         ucp_request_free(request);
     }
-    nixlMemoryPool<nixlUcxAmSendContext> pool;
-    pool.put(std::move(ctx));
 }
 
 nixl_status_t
 nixlUcxEp::sendAm(nixl::ucx::am_cb_op_t msg_id,
-                  std::string_view payload,
+                  std::string &&payload,
                   uint32_t flags,
                   nixlUcxReq *req) const {
     const nixl_status_t status = checkTxState();
@@ -207,27 +193,18 @@ nixlUcxEp::sendAm(nixl::ucx::am_cb_op_t msg_id,
         return status;
     }
 
+    auto ctx = std::make_unique<nixl_ucx_am_send_ctx_t>(std::move(payload), req == nullptr);
+
     ucp_request_param_t param;
-    param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_MEMORY_TYPE | UCP_OP_ATTR_FLAG_FORCE_IMM_CMPL;
-    param.flags = flags;
-    param.memory_type = UCS_MEMORY_TYPE_HOST;
-
-    const ucs_status_ptr_t immediate =
-        ucp_am_send_nbx(eph_, unsigned(msg_id), nullptr, 0, payload.data(), payload.size(), &param);
-    if (immediate != UCS_STATUS_PTR(UCS_ERR_NO_RESOURCE)) {
-        return nixl::ucx::ucsToNixlStatus(UCS_PTR_STATUS(immediate));
-    }
-
-    nixlMemoryPool<nixlUcxAmSendContext> pool;
-    auto ctx = pool.get(payload, req == nullptr);
     param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS | UCP_OP_ATTR_FIELD_MEMORY_TYPE |
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+    param.flags = flags;
+    param.memory_type = UCS_MEMORY_TYPE_HOST;
     param.cb.send = sendAmCallback;
     param.user_data = ctx.get();
 
     const ucs_status_ptr_t request = ucp_am_send_nbx(
-        eph_, unsigned(msg_id), nullptr, 0, ctx->payload.data(), ctx->payload.size(), &param);
+        eph_, unsigned(msg_id), nullptr, 0, ctx->first.data(), ctx->first.size(), &param);
     if (UCS_PTR_IS_PTR(request)) {
         ctx.release();
         if (req != nullptr) {
@@ -236,7 +213,6 @@ nixlUcxEp::sendAm(nixl::ucx::am_cb_op_t msg_id,
         return NIXL_IN_PROG;
     }
 
-    pool.put(std::move(ctx));
     return nixl::ucx::ucsToNixlStatus(UCS_PTR_STATUS(request));
 }
 

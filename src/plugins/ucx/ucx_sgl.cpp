@@ -28,15 +28,6 @@ sglXfer::sglXfer(const nixl_meta_dlist_t &local,
                  size_t worker_id,
                  size_t start_idx,
                  size_t end_idx) {
-    reset(local, remote, worker_id, start_idx, end_idx);
-}
-
-void
-sglXfer::reset(const nixl_meta_dlist_t &local,
-               const nixl_meta_dlist_t &remote,
-               size_t worker_id,
-               size_t start_idx,
-               size_t end_idx) {
     NIXL_ASSERT(end_idx > start_idx);
     size_ = end_idx - start_idx;
     conn_ = static_cast<nixlUcxPublicMetadata *>(remote[start_idx].metadataP)->conn;
@@ -45,19 +36,16 @@ sglXfer::reset(const nixl_meta_dlist_t &local,
                       sizeof(ucp_mem_h) == sizeof(uint64_t) &&
                       sizeof(ucp_rkey_h) == sizeof(uint64_t),
                   "sglXfer assumes all field types are 8 bytes wide");
-    if (size_ > capacity_) {
-        constexpr size_t field_bytes = sizeof(uint64_t);
-        const size_t array_bytes = size_ * field_bytes;
+    constexpr size_t field_bytes = sizeof(uint64_t);
+    const size_t array_bytes = size_ * field_bytes;
 
-        storage_ = std::make_unique_for_overwrite<std::byte[]>(num_fields * array_bytes);
-        capacity_ = size_;
-        std::byte *const base = storage_.get();
-        localAddrs_ = reinterpret_cast<void **>(base + 0 * array_bytes);
-        remoteAddrs_ = reinterpret_cast<uint64_t *>(base + 1 * array_bytes);
-        lengths_ = reinterpret_cast<size_t *>(base + 2 * array_bytes);
-        memhs_ = reinterpret_cast<ucp_mem_h *>(base + 3 * array_bytes);
-        rkeys_ = reinterpret_cast<ucp_rkey_h *>(base + 4 * array_bytes);
-    }
+    storage_ = std::make_unique_for_overwrite<std::byte[]>(num_fields * array_bytes);
+    std::byte *const base = storage_.get();
+    localAddrs_ = reinterpret_cast<void **>(base + 0 * array_bytes);
+    remoteAddrs_ = reinterpret_cast<uint64_t *>(base + 1 * array_bytes);
+    lengths_ = reinterpret_cast<size_t *>(base + 2 * array_bytes);
+    memhs_ = reinterpret_cast<ucp_mem_h *>(base + 3 * array_bytes);
+    rkeys_ = reinterpret_cast<ucp_rkey_h *>(base + 4 * array_bytes);
 
     for (size_t i = start_idx; i < end_idx; ++i) {
         const size_t out = i - start_idx;

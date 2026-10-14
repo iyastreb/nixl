@@ -55,7 +55,7 @@ public:
     }
 
 private:
-    void
+    const char *
     prepareRuns();
 
     [[nodiscard]] ucp_dt_local_sgl_t

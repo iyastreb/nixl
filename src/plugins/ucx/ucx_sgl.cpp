@@ -23,14 +23,136 @@
 #include "common/nixl_log.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <limits>
+#include <mutex>
+#include <sstream>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 namespace nixl::ucx {
 
 namespace {
+struct SglProfileState {
+    std::atomic<bool> disabled{false};
+    std::mutex mutex;
+    std::array<uint64_t, 64> shapes{};
+    size_t count = 0;
+};
+
+SglProfileState &
+profileState() {
+    static SglProfileState state;
+    return state;
+}
+
+bool
+profileEnabled() noexcept {
+    static const bool enabled = []() noexcept {
+        try {
+            return nixl::config::getValueDefaulted("NIXL_UCX_SGL_PROFILE", false);
+        }
+        catch (...) {
+            return false;
+        }
+    }();
+    try {
+        return enabled && !profileState().disabled.load(std::memory_order_relaxed);
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+struct SglProfileGeometry {
+    uint64_t hash = 14695981039346656037ULL;
+    size_t bytes = 0;
+    size_t lengthRuns = 0;
+};
+
+void
+profileSgl(const size_t *lengths,
+           size_t count,
+           size_t worker_id,
+           size_t posted_runs,
+           bool split_requested,
+           const char *decision) noexcept {
+    SglProfileState *state_ptr = nullptr;
+    try {
+        auto &state = profileState();
+        state_ptr = &state;
+        if (state.disabled.load(std::memory_order_relaxed)) {
+            return;
+        }
+        SglProfileGeometry geometry;
+        for (size_t i = 0; i < count; ++i) {
+            geometry.bytes += lengths[i];
+            geometry.lengthRuns += i == 0 || lengths[i] != lengths[i - 1];
+            geometry.hash = (geometry.hash ^ lengths[i]) * 1099511628211ULL;
+        }
+        std::lock_guard lock(state.mutex);
+        if (state.disabled.load(std::memory_order_relaxed)) {
+            return;
+        }
+        uint64_t shape_hash = geometry.hash;
+        for (const char *p = decision; *p; ++p) {
+            shape_hash = (shape_hash ^ static_cast<unsigned char>(*p)) * 1099511628211ULL;
+        }
+        shape_hash = (shape_hash ^ posted_runs) * 1099511628211ULL;
+        if (std::find(state.shapes.begin(), state.shapes.begin() + state.count, shape_hash) !=
+            state.shapes.begin() + state.count) {
+            return;
+        }
+        std::array<std::pair<size_t, size_t>, 16> histogram{};
+        size_t bins = 0;
+        bool truncated = false;
+        for (size_t i = 0; i < count; ++i) {
+            size_t j = 0;
+            while (j < bins && histogram[j].first != lengths[i]) {
+                ++j;
+            }
+            if (j < bins) {
+                ++histogram[j].second;
+            } else if (bins < histogram.size()) {
+                histogram[bins++] = {lengths[i], 1};
+            } else {
+                truncated = true;
+            }
+        }
+        std::sort(histogram.begin(), histogram.begin() + bins);
+        std::ostringstream line;
+        line.exceptions(std::ios::badbit | std::ios::failbit);
+        line << "NIXL_UCX_SGL_PROFILE {\"representative\":true,\"pid\":" << getpid()
+             << ",\"worker_id\":" << worker_id << ",\"n_desc\":" << count
+             << ",\"bytes\":" << geometry.bytes << ",\"adjacent_length_runs\":"
+             << geometry.lengthRuns << ",\"posted_runs\":" << posted_runs
+             << ",\"split_requested\":" << (split_requested ? "true" : "false")
+             << ",\"decision\":\"" << decision << "\",\"length_sequence_hash\":\""
+             << std::hex << geometry.hash << std::dec << "\",\"length_hist\":[";
+        for (size_t i = 0; i < bins; ++i) {
+            line << (i ? ",[" : "[") << histogram[i].first << ',' << histogram[i].second << ']';
+        }
+        line << "],\"length_hist_truncated\":" << (truncated ? "true" : "false") << '}';
+        if (std::fprintf(stderr, "%s\n", line.str().c_str()) < 0) {
+            state.disabled.store(true, std::memory_order_relaxed);
+            return;
+        }
+        state.shapes[state.count++] = shape_hash;
+        if (state.count == state.shapes.size()) {
+            state.disabled.store(true, std::memory_order_relaxed);
+            std::fprintf(stderr, "NIXL_UCX_SGL_PROFILE {\"saturated\":true,\"limit\":64}\n");
+        }
+    }
+    catch (...) {
+        if (state_ptr) {
+            state_ptr->disabled.store(true, std::memory_order_relaxed);
+        }
+    }
+}
+
 template<typename Address>
 bool
 nonOverlapping(const Address *addresses, const size_t *lengths, size_t count) {
@@ -100,32 +222,44 @@ sglXfer::sglXfer(const nixl_meta_dlist_t &local,
         rkeys_[out] = rmd->getRkey(worker_id).get();
     }
     runOffsets_[1] = size_;
-    if (allow_split && nixl::config::getValueDefaulted("NIXL_UCX_SGL_SPLIT_BY_SIZE", false)) {
-        prepareRuns();
+    const bool split_requested =
+        allow_split && nixl::config::getValueDefaulted("NIXL_UCX_SGL_SPLIT_BY_SIZE", false);
+    const char *decision = allow_split ? "disabled" : "local_transfer";
+    if (split_requested) {
+        decision = prepareRuns();
+    }
+    if (profileEnabled()) {
+        profileSgl(lengths_, size_, worker_id, runCount_, split_requested, decision);
     }
 }
 
-void
+const char *
 sglXfer::prepareRuns() {
     std::array<size_t, max_runs + 1> offsets{};
     size_t runs = 1;
     for (size_t i = 1; i < size_; ++i) {
         if (lengths_[i] != lengths_[i - 1]) {
             if (runs == max_runs) {
-                return;
+                return "too_many_runs";
             }
             offsets[runs++] = i;
         }
     }
-    if (runs == 1 || !nonOverlapping(localAddrs_, lengths_, size_) ||
-        !nonOverlapping(remoteAddrs_, lengths_, size_)) {
-        return;
+    if (runs == 1) {
+        return "homogeneous";
+    }
+    if (!nonOverlapping(localAddrs_, lengths_, size_)) {
+        return "local_overlap_or_overflow";
+    }
+    if (!nonOverlapping(remoteAddrs_, lengths_, size_)) {
+        return "remote_overlap_or_overflow";
     }
     offsets[runs] = size_;
     runOffsets_ = offsets;
     runCount_ = runs;
     NIXL_DEBUG << "UCX SGL split " << size_ << " descriptors into " << runs
                << " equal-length runs";
+    return "split";
 }
 
 nixl_status_t

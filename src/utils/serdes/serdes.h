@@ -35,9 +35,6 @@ private:
 public:
     nixlSerDes();
 
-    void
-    reset();
-
     /* Ser/Des for Strings */
     nixl_status_t addStr(const std::string &tag, const std::string &str);
     std::string getStr(const std::string &tag);
@@ -65,8 +62,6 @@ public:
     exportMoveStr() &&;
 
     nixl_status_t importStr(const std::string &sdbuf);
-    nixl_status_t
-    importStr(const char *data, size_t length);
 
     static std::string _bytesToString(const void *buf, ssize_t size);
     static void _stringToBytes(void* fill_buf, const std::string &s, ssize_t size);

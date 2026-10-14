@@ -374,7 +374,7 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
 
 #ifdef HAVE_UCX_SGL_API
     if (sglEnabled_ && operation == NIXL_WRITE) {
-        return prepXferSgl(local, remote, handle);
+        return prepXferSgl(local, remote, handle, remote_agent != localAgent);
     }
 #endif
 
@@ -442,11 +442,12 @@ nixl_status_t nixlUcxEngine::estimateXferCost (const nixl_xfer_op_t &operation,
 nixl_status_t
 nixlUcxEngine::prepXferSgl(const nixl_meta_dlist_t &local,
                            const nixl_meta_dlist_t &remote,
-                           nixlBackendReqH *handle) const {
+                           nixlBackendReqH *handle,
+                           bool allow_split) const {
     NIXL_ASSERT(local.descCount() == remote.descCount());
 
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
-    int_handle->sgl.emplace(local, remote, int_handle->getWorkerId(), 0, local.descCount());
+    int_handle->sgl.emplace(local, remote, int_handle->getWorkerId(), 0, local.descCount(), allow_split);
     return NIXL_SUCCESS;
 }
 
@@ -459,12 +460,14 @@ nixlUcxEngine::sendXferSgl(nixlBackendReqH *handle) const {
     const ucx_connection_ptr_t &conn = sgl.conn();
 
     auto &ep = conn->getEp(int_handle->getWorkerId());
-    int_handle->init(conn, *ep);
+    int_handle->init(conn, *ep, sgl.runCount());
 
-    nixlUcxReq req;
-    const nixl_status_t post_ret = sgl.post(*ep, req);
-    if (int_handle->append(post_ret, req) != NIXL_SUCCESS) {
-        return post_ret;
+    for (size_t run = 0; run < sgl.runCount(); ++run) {
+        nixlUcxReq req = nullptr;
+        const nixl_status_t post_ret = sgl.post(*ep, run, req);
+        if (int_handle->append(post_ret, req) != NIXL_SUCCESS) {
+            return post_ret;
+        }
     }
 
     nixlUcxReq flush_req;
@@ -495,7 +498,8 @@ nixlUcxEngine::sendXferRange(const nixl_xfer_op_t &operation,
 #ifdef HAVE_UCX_SGL_API
     if (sglEnabled_ && operation == NIXL_WRITE) {
         if (!int_handle->sgl) {
-            int_handle->sgl.emplace(local, remote, worker_id, start_idx, end_idx);
+            int_handle->sgl.emplace(local, remote, worker_id, start_idx, end_idx,
+                                     remote_agent != localAgent);
         }
         return sendXferSgl(handle);
     }

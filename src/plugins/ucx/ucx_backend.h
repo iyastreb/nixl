@@ -317,7 +317,8 @@ private:
     nixl_status_t
     prepXferSgl(const nixl_meta_dlist_t &local,
                 const nixl_meta_dlist_t &remote,
-                nixlBackendReqH *handle) const;
+                nixlBackendReqH *handle,
+                bool allow_split) const;
 
     nixl_status_t
     sendXferSgl(nixlBackendReqH *handle) const;

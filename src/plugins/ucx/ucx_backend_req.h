@@ -44,9 +44,9 @@ public:
     }
 
     void
-    init(const ucx_connection_ptr_t &conn, const nixlUcxEp &ep) {
+    init(const ucx_connection_ptr_t &conn, const nixlUcxEp &ep, size_t data_requests = 1) {
         NIXL_ASSERT(requests_.empty());
-        requests_.reserve(max_requests);
+        requests_.reserve(data_requests + 2);
         conn_ = conn;
         ep_ = &ep;
     }
@@ -150,10 +150,6 @@ protected:
     }
 
 private:
-    // A post to a single endpoint issues at most three requests:
-    // one data request, one flush request, and one notification request.
-    static constexpr size_t max_requests = 3;
-
     void
     reset() noexcept {
         requests_.clear();

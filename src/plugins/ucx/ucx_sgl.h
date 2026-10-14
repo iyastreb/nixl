@@ -19,6 +19,7 @@
 
 #ifdef HAVE_UCX_SGL_API
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,7 +38,8 @@ public:
             const nixl_meta_dlist_t &remote,
             size_t worker_id,
             size_t start_idx,
-            size_t end_idx);
+            size_t end_idx,
+            bool allow_split);
 
     [[nodiscard]] const ucx_connection_ptr_t &
     conn() const noexcept {
@@ -45,33 +47,44 @@ public:
     }
 
     [[nodiscard]] nixl_status_t
-    post(nixlUcxEp &ep, nixlUcxReq &req) const;
+    post(nixlUcxEp &ep, size_t run, nixlUcxReq &req) const;
+
+    [[nodiscard]] size_t
+    runCount() const noexcept {
+        return runCount_;
+    }
 
 private:
+    void
+    prepareRuns();
+
     [[nodiscard]] ucp_dt_local_sgl_t
-    localView() const noexcept {
+    localView(size_t offset) const noexcept {
         return {
             .field_mask = UCP_DT_LOCAL_SGL_FIELD_BUFFERS | UCP_DT_LOCAL_SGL_FIELD_LENGTHS |
                 UCP_DT_LOCAL_SGL_FIELD_MEMHS,
-            .buffers = localAddrs_,
-            .lengths = lengths_,
-            .memhs = memhs_,
+            .buffers = localAddrs_ + offset,
+            .lengths = lengths_ + offset,
+            .memhs = memhs_ + offset,
         };
     }
 
     [[nodiscard]] ucp_dt_remote_sgl_t
-    remoteView() const noexcept {
+    remoteView(size_t offset) const noexcept {
         return {
             .field_mask = UCP_DT_REMOTE_SGL_FIELD_REMOTE_ADDRS | UCP_DT_REMOTE_SGL_FIELD_LENGTHS |
                 UCP_DT_REMOTE_SGL_FIELD_RKEYS,
-            .remote_addrs = remoteAddrs_,
-            .lengths = lengths_,
-            .rkeys = rkeys_,
+            .remote_addrs = remoteAddrs_ + offset,
+            .lengths = lengths_ + offset,
+            .rkeys = rkeys_ + offset,
         };
     }
 
     static constexpr size_t num_fields = 5;
+    static constexpr size_t max_runs = 8;
 
+    std::array<size_t, max_runs + 1> runOffsets_{};
+    size_t runCount_ = 1;
     std::unique_ptr<std::byte[]> storage_;
     void **localAddrs_;
     uint64_t *remoteAddrs_;

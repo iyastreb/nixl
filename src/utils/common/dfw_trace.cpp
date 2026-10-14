@@ -80,7 +80,8 @@ void emit(const Event &e) noexcept {
         (unsigned long long)e.descs, (unsigned long long)e.bytes, (unsigned long long)e.count,
         (unsigned long long)e.value, (unsigned long long)e.lock_ns,
         (unsigned long long)e.cpu_ns, (unsigned long long)e.completed_ns, e.status);
-    if ((++out.count % 32 == 0) || e.end - out.last_flush >= 100000000ULL) {
+    if ((++out.count % 32 == 0) ||
+        (e.end >= out.last_flush && e.end - out.last_flush >= 100000000ULL)) {
         flush();
     }
 }

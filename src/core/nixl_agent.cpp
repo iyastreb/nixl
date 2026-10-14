@@ -69,13 +69,41 @@ nixlXferReqH::nixlXferReqH(const std::string &remote_agent,
                            const nixl_remote_section_weak_t &remote_section_ref,
                            const nixl::trace::TraceContext &trace_context)
     : initiatorDescs(local_type),
-      targetDescs(remote_type),
-      remoteAgent(remote_agent),
-      remoteSection(remote_section_ref),
-      traceContext_(trace_context),
-      backendOp(backend_op) {
+      targetDescs(remote_type) {
+    reset(remote_agent,
+          backend_op,
+          local_type,
+          remote_type,
+          desc_count,
+          remote_section_ref,
+          trace_context);
+}
+
+void
+nixlXferReqH::reset(const std::string &remote_agent,
+                    const nixl_xfer_op_t backend_op,
+                    const nixl_mem_t local_type,
+                    const nixl_mem_t remote_type,
+                    const size_t desc_count,
+                    const nixl_remote_section_weak_t &remote_section_ref,
+                    const nixl::trace::TraceContext &trace_context) {
+    engine = nullptr;
+    backendHandle = nullptr;
+    initiatorDescs.setType(local_type);
+    initiatorDescs.clear();
     initiatorDescs.reserve(desc_count);
+    targetDescs.setType(remote_type);
+    targetDescs.clear();
     targetDescs.reserve(desc_count);
+    remoteAgent = remote_agent;
+    remoteSection = remote_section_ref;
+    traceContext_ = trace_context;
+    notifMsg.clear();
+    hasNotif = false;
+    backendOp = backend_op;
+    status = NIXL_ERR_NOT_POSTED;
+    telemetry = nixl_xfer_telem_t{};
+    timer.restart();
 }
 
 void
@@ -864,16 +892,14 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     const nixl_meta_stride_dlist_t &local_descs = *local_side.descs.at(backend);
     const nixl_meta_stride_dlist_t &remote_descs = *remote_side.descs.at(backend);
 
-    // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
-
     nixl::dfw::Scope dfw_allocate("core.allocate");
-    auto handle = std::make_unique<nixlXferReqH>(remote_side.remoteAgent,
-                                                 operation,
-                                                 local_descs.getType(),
-                                                 remote_descs.getType(),
-                                                 desc_count,
-                                                 remote_side.remoteSectionRef,
-                                                 nixl::trace::TraceContext{data->tracer_.get()});
+    auto handle = data->xferReqPool.get(remote_side.remoteAgent,
+                                        operation,
+                                        local_descs.getType(),
+                                        remote_descs.getType(),
+                                        desc_count,
+                                        remote_side.remoteSectionRef,
+                                        nixl::trace::TraceContext{data->tracer_.get()});
     if (dfw_allocate.start) {
         handle->dfwPoll = {};
         handle->dfwPostStart = 0;
@@ -1054,16 +1080,15 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
 
     // TODO: when central KV is supported, add a call to fetchRemoteMD
     // TODO: merge descriptors back to back in memory (like makeXferReq).
-    // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
     nixl::dfw::Scope dfw_allocate("core.allocate");
-    auto handle = std::make_unique<nixlXferReqH>(remote_agent,
-                                                 operation,
-                                                 local_descs.getType(),
-                                                 remote_descs.getType(),
-                                                 local_descs.descCount(),
-                                                 rem_sec_it->second,
-                                                 nixl::trace::TraceContext{data->tracer_.get()});
+    auto handle = data->xferReqPool.get(remote_agent,
+                                        operation,
+                                        local_descs.getType(),
+                                        remote_descs.getType(),
+                                        local_descs.descCount(),
+                                        rem_sec_it->second,
+                                        nixl::trace::TraceContext{data->tracer_.get()});
     if (dfw_allocate.start) {
         handle->dfwPoll = {};
         handle->dfwPostStart = 0;
@@ -1438,7 +1463,15 @@ nixlAgent::releaseXferReq(nixlXferReqH *req_hndl) const {
             req_hndl->backendHandle = nullptr;
         }
     }
-    delete req_hndl;
+
+    if ((req_hndl->backendHandle != nullptr) && (req_hndl->engine != nullptr)) {
+        req_hndl->engine->releaseReqH(req_hndl->backendHandle);
+        req_hndl->backendHandle = nullptr;
+    }
+    req_hndl->engine = nullptr;
+    req_hndl->remoteSection.reset();
+
+    data->xferReqPool.put(std::unique_ptr<nixlXferReqH>(req_hndl));
     return NIXL_SUCCESS;
 }
 
@@ -1457,13 +1490,13 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
 
     nixl::dfw::Scope dfw("core.get_notifs");
     dfw.flush_after = true;
-    notif_list_t bknd_notif_list;
     nixl_status_t   ret, bad_ret=NIXL_SUCCESS;
     backend_list_t* backend_list;
 
     const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_LOCK_GUARD(data->lock);
     if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
+    auto &bknd_notif_list = data->notifScratch_;
     if (!extra_params || extra_params->backends.size() == 0) {
         backend_list = &data->notifEngines;
         if (backend_list->empty()) {
@@ -1507,6 +1540,7 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
         }
     }
 
+    bknd_notif_list.clear();
     if (extra_params && extra_params->backends.size() > 0)
         delete backend_list;
 

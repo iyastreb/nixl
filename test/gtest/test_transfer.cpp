@@ -27,6 +27,7 @@
 #include <absl/strings/str_format.h>
 #include <absl/time/clock.h>
 #include <gtest/gtest.h>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -649,6 +650,66 @@ TEST_P(TestTransfer, EmptyNotificationPayload) {
     constexpr size_t num_threads = 2;
     doNotificationTest(
         getAgent(0), getAgentName(0), getAgent(1), getAgentName(1), repeat, num_threads, "");
+}
+
+TEST_P(TestTransfer, RepostWithChangedNotifications) {
+    auto &from = getAgent(0);
+    auto &to = getAgent(1);
+    const auto from_name = getAgentName(0);
+    const auto to_name = getAgentName(1);
+    std::vector<MemBuffer> src_buffers, dst_buffers;
+    createRegisteredMem(from, 4096, 1, DRAM_SEG, src_buffers);
+    createRegisteredMem(to, 4096, 1, DRAM_SEG, dst_buffers);
+    exchangeMD(0, 1);
+
+    nixlXferReqH *req = nullptr;
+    ASSERT_EQ(from.createXferReq(NIXL_WRITE,
+                                 makeDescList<nixlBasicDesc>(src_buffers, DRAM_SEG),
+                                 makeDescList<nixlBasicDesc>(dst_buffers, DRAM_SEG),
+                                 to_name,
+                                 req),
+              NIXL_SUCCESS);
+
+    const std::array<std::optional<std::string>, 6> messages = {
+        "A", "A", "B", std::nullopt, "", std::string(64 * 1024, 'x')};
+    std::vector<std::string> expected;
+    nixl_notifs_t received;
+    for (const auto &message : messages) {
+        nixl_opt_args_t options;
+        options.notif = message;
+        if (message) {
+            expected.push_back(*message);
+        }
+        auto status = from.postXferReq(req, &options);
+        ASSERT_TRUE(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+        ASSERT_TRUE(wait_until_true([&] {
+            status = from.getXferStatus(req);
+            EXPECT_EQ(to.getNotifs(received), NIXL_SUCCESS);
+            return status != NIXL_IN_PROG && received[from_name].size() >= expected.size();
+        }));
+        EXPECT_EQ(status, NIXL_SUCCESS);
+        EXPECT_EQ(received[from_name], expected);
+    }
+    // A standalone send cannot rely on the transfer handle keeping its payload alive.
+    ASSERT_EQ(from.genNotif(to_name, std::string(64 * 1024, 'y')), NIXL_SUCCESS);
+    verifyNotifs(to, from_name, 1, std::string(64 * 1024, 'y'), {}, &from);
+
+    // The transfer flush completes the standalone eager send before disconnect.
+    nixl_opt_args_t no_notif;
+    auto status = from.postXferReq(req, &no_notif);
+    ASSERT_TRUE(status == NIXL_SUCCESS || status == NIXL_IN_PROG);
+    ASSERT_TRUE(wait_until_true([&] {
+        status = from.getXferStatus(req);
+        EXPECT_EQ(to.getNotifs(received), NIXL_SUCCESS);
+        return status != NIXL_IN_PROG;
+    }));
+    EXPECT_EQ(status, NIXL_SUCCESS);
+    EXPECT_EQ(received[from_name], expected);
+    EXPECT_EQ(from.releaseXferReq(req), NIXL_SUCCESS);
+
+    invalidateMD(0, 1);
+    deregisterMem(from, src_buffers, DRAM_SEG);
+    deregisterMem(to, dst_buffers, DRAM_SEG);
 }
 
 class TestListener : public TestTransfer {};

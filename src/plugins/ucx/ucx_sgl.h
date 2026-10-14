@@ -39,6 +39,19 @@ public:
             size_t start_idx,
             size_t end_idx);
 
+    void
+    reset(const nixl_meta_dlist_t &local,
+          const nixl_meta_dlist_t &remote,
+          size_t worker_id,
+          size_t start_idx,
+          size_t end_idx);
+
+    void
+    clear() noexcept {
+        conn_.reset();
+        size_ = 0;
+    }
+
     [[nodiscard]] const ucx_connection_ptr_t &
     conn() const noexcept {
         return conn_;
@@ -79,6 +92,7 @@ private:
     ucp_mem_h *memhs_;
     ucp_rkey_h *rkeys_;
     size_t size_ = 0;
+    size_t capacity_ = 0;
     ucx_connection_ptr_t conn_;
 };
 

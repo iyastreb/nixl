@@ -26,6 +26,7 @@
 
 #include "backend/backend_engine.h"
 #include "common/nixl_log.h"
+#include "common/dfw_trace.h"
 
 #include "ucx_backend.h"
 #include "ucx_sgl.h"
@@ -36,6 +37,7 @@ public:
     // Notification to be sent over the bound connection after completion of all requests.
     // Empty if there is no pending notification.
     std::string notif;
+    nixl::dfw::PollStats dfwPoll;
 
 #ifdef HAVE_UCX_SGL_API
     std::optional<nixl::ucx::sglXfer> sgl;
@@ -76,6 +78,7 @@ public:
      */
     [[nodiscard]] nixl_status_t
     flush() {
+        nixl::dfw::Scope dfw("ucx.flush", this);
         nixlUcxReq req = nullptr;
         const nixl_status_t status = ep_->flushEp(req);
         return append(status, req);
@@ -83,6 +86,7 @@ public:
 
     [[nodiscard]] nixl_status_t
     sendNotif() {
+        nixl::dfw::Scope dfw("ucx.notif_send", this);
         nixlUcxReq req = nullptr;
         const nixl_status_t status = getEp().sendAm(
             nixl::ucx::am_cb_op_t::NOTIF_STR, std::move(notif), UCP_AM_SEND_FLAG_EAGER, &req);
@@ -122,7 +126,12 @@ public:
             return NIXL_SUCCESS;
         }
 
+        const auto dfw_start = nixl::dfw::enabled() ? nixl::dfw::now() : 0;
         worker_->progressLoop();
+        if (dfw_start) {
+            ++dfwPoll.count;
+            dfwPoll.progress_ns += nixl::dfw::now() - dfw_start;
+        }
 
         /* If last request is incomplete, return NIXL_IN_PROG early without
          * checking other requests */

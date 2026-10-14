@@ -41,6 +41,7 @@ nixl_common_lib = shared_library('nixl_common',
     'uuid_v4.cpp',
     'configuration.cpp',
     'nixl_duration.cpp',
+    'dfw_trace.cpp',
     dependencies: nixl_common_deps,
     include_directories: [nixl_common_inc, nixl_inc_dirs],
     cpp_args: [

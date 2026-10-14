@@ -16,6 +16,7 @@
  */
 
 #include "ucx_utils.h"
+#include "common/dfw_trace.h"
 
 #include <cstring>
 #include <exception>
@@ -333,6 +334,8 @@ nixlUcxEp::postSgl(const ucp_dt_local_sgl_t &local,
         .remote_count = count,
     };
 
+    nixl::dfw::Scope dfw("ucx.put_sgl", this);
+    dfw.descs = count;
     const ucs_status_ptr_t request =
         ucp_put_nbx(eph_, &local, count, UCP_REMOTE_ADDR_INVALID, UCP_RKEY_INVALID, &param);
     if (UCS_PTR_IS_PTR(request)) {

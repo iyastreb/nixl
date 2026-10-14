@@ -26,6 +26,7 @@
 #include "backend_engine.h"
 #include "telemetry.h"
 #include "common/nixl_duration.h"
+#include "common/dfw_trace.h"
 #include "tracing/trace_context.h"
 
 enum nixl_telemetry_stat_status_t {
@@ -99,6 +100,8 @@ private:
 
     nixl_xfer_telem_t telemetry;
     nixlTime::nixlDuration timer;
+    nixl::dfw::PollStats dfwPoll;
+    uint64_t dfwPostStart = 0;
 };
 
 struct nixlDlistH {

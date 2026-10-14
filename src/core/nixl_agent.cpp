@@ -454,6 +454,8 @@ nixlAgent::queryMem(const nixl_reg_dlist_t &descs,
 nixl_status_t
 nixlAgent::registerMem(const nixl_reg_dlist_t &descs,
                        const nixl_opt_args_t* extra_params) {
+    nixl::dfw::Scope dfw("core.register");
+    dfw.descs = descs.descCount();
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::registerMem", nixl::trace::Kind::MemoryW);
     NIXL_TRACE_ATTR(trace_span, "mem_type", static_cast<std::int64_t>(descs.getType()));
@@ -523,6 +525,8 @@ nixlAgent::registerMem(const nixl_reg_dlist_t &descs,
 nixl_status_t
 nixlAgent::deregisterMem(const nixl_reg_dlist_t &descs,
                          const nixl_opt_args_t* extra_params) {
+    nixl::dfw::Scope dfw("core.deregister");
+    dfw.descs = descs.descCount();
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::deregisterMem", nixl::trace::Kind::Generic);
     NIXL_TRACE_ATTR(trace_span, "mem_type", static_cast<std::int64_t>(descs.getType()));
@@ -530,7 +534,9 @@ nixlAgent::deregisterMem(const nixl_reg_dlist_t &descs,
     backend_set_t backend_set;
     nixl_status_t bad_ret = NIXL_SUCCESS;
 
+    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_LOCK_GUARD(data->lock);
+    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     if (!extra_params || extra_params->backends.size() == 0) {
         backend_set_t *avail_backends = data->localSection_.queryBackends(descs.getType());
         if (!avail_backends || avail_backends->empty()) {
@@ -637,11 +643,16 @@ nixlAgentData::prepXferDlist(const std::string &agent_name,
                              nixlDlistH *&dlist_hndl,
                              const nixl_opt_args_t *extra_params) {
 
+    nixl::dfw::Scope dfw("core.prep_dlist");
+    dfw.descs = descs.descCount();
+
     // Using a set as order is not important to revert the operation
     backend_set_t *backend_set;
     const bool init_side = (agent_name == NIXL_INIT_AGENT);
 
+    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_SHARED_LOCK_GUARD(lock);
+    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     // When central KV is supported, still it should return error,
     // just we can add a call to fetchRemoteMD for next time
     const auto rem_sec_it = remoteSections_.find(agent_name);
@@ -770,6 +781,8 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
         trace_span, data->tracer_.get(), "nixl::makeXferReq", nixl::trace::Kind::Generic);
     NIXL_TRACE_ATTR(trace_span, "desc_count", static_cast<std::int64_t>(local_indices.size()));
 
+    nixl::dfw::Scope dfw("core.make", nullptr, true);
+    dfw.descs = local_indices.size();
     nixl_opt_b_args_t  opt_args;
     nixl_status_t      ret;
     int                desc_count = (int) local_indices.size();
@@ -834,7 +847,9 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
         return NIXL_ERR_BACKEND;
     }
 
+    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_SHARED_LOCK_GUARD(data->lock);
+    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     // The prepped remote dlist snapshot is only valid for the remote registration generation
     // it was prepared from: reject if that generation was invalidated or replaced since.
     const auto remote_sec_ref = remote_side.remoteSectionRef.lock();
@@ -851,6 +866,7 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
 
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
+    nixl::dfw::Scope dfw_allocate("core.allocate");
     auto handle = std::make_unique<nixlXferReqH>(remote_side.remoteAgent,
                                                  operation,
                                                  local_descs.getType(),
@@ -858,6 +874,9 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
                                                  desc_count,
                                                  remote_side.remoteSectionRef,
                                                  nixl::trace::TraceContext{data->tracer_.get()});
+    dfw_allocate.handle = reinterpret_cast<uint64_t>(handle.get());
+    dfw_allocate.finish();
+    nixl::dfw::Scope dfw_descs("core.descriptors", handle.get());
 
     size_t total_bytes = 0;
     const bool skip_desc_merge = extra_params && extra_params->skipDescMerge;
@@ -932,6 +951,9 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     handle->telemetry.totalBytes = total_bytes;
     handle->telemetry.descCount = handle->initiatorDescs.descCount();
 
+    dfw_descs.descs = handle->initiatorDescs.descCount();
+    dfw_descs.bytes = total_bytes;
+    dfw_descs.finish();
     opt_args.traceContext = &handle->traceContext();
     ret = handle->engine->prepXfer(handle->backendOp,
                                    handle->initiatorDescs,
@@ -948,6 +970,10 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
 
     data->warnIfTraceContextUnsupported(*backend, handle->traceContext());
     req_hndl = handle.release();
+    dfw.handle = reinterpret_cast<uint64_t>(req_hndl);
+    dfw.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
+    dfw.bytes = total_bytes;
+    dfw.count = req_hndl->initiatorDescs.descCount();
     return NIXL_SUCCESS;
 }
 
@@ -963,6 +989,8 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     NIXL_TRACE_ATTR(trace_span, "remote_agent", std::string_view{remote_agent});
     NIXL_TRACE_ATTR(trace_span, "desc_count", static_cast<std::int64_t>(local_descs.descCount()));
 
+    nixl::dfw::Scope dfw("core.create", nullptr, true);
+    dfw.descs = local_descs.descCount();
     nixl_status_t ret1, ret2;
     nixl_opt_b_args_t opt_args;
     backend_set_t backend_set;
@@ -985,7 +1013,9 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         total_bytes += local_descs[i].len;
     }
 
+    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_SHARED_LOCK_GUARD(data->lock);
+    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     const auto rem_sec_it = data->remoteSections_.find(remote_agent);
     if (data->remoteSections_.end() == rem_sec_it) {
         NIXL_ERROR_FUNC << "metadata for remote agent '" << remote_agent << "' not found";
@@ -1022,6 +1052,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     // TODO: merge descriptors back to back in memory (like makeXferReq).
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
+    nixl::dfw::Scope dfw_allocate("core.allocate");
     auto handle = std::make_unique<nixlXferReqH>(remote_agent,
                                                  operation,
                                                  local_descs.getType(),
@@ -1029,6 +1060,9 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                                                  local_descs.descCount(),
                                                  rem_sec_it->second,
                                                  nixl::trace::TraceContext{data->tracer_.get()});
+    dfw_allocate.handle = reinterpret_cast<uint64_t>(handle.get());
+    dfw_allocate.finish();
+    nixl::dfw::Scope dfw_descs("core.descriptors", handle.get());
 
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
@@ -1080,6 +1114,9 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->telemetry.totalBytes = total_bytes;
     handle->telemetry.descCount = handle->initiatorDescs.descCount();
 
+    dfw_descs.descs = handle->initiatorDescs.descCount();
+    dfw_descs.bytes = total_bytes;
+    dfw_descs.finish();
     opt_args.traceContext = &handle->traceContext();
     ret1 = handle->engine->prepXfer(handle->backendOp,
                                     handle->initiatorDescs,
@@ -1096,6 +1133,10 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
 
     data->warnIfTraceContextUnsupported(*handle->engine, handle->traceContext());
     req_hndl = handle.release();
+    dfw.handle = reinterpret_cast<uint64_t>(req_hndl);
+    dfw.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
+    dfw.bytes = total_bytes;
+    dfw.count = req_hndl->initiatorDescs.descCount();
     return NIXL_SUCCESS;
 }
 
@@ -1143,6 +1184,7 @@ nixlAgent::estimateXferCost(const nixlXferReqH *req_hndl,
 nixl_status_t
 nixlAgent::postXferReq(nixlXferReqH *req_hndl,
                        const nixl_opt_args_t* extra_params) const {
+    nixl::dfw::Scope dfw("core.post", req_hndl, true);
     nixl_opt_b_args_t opt_args;
 
     opt_args.hasNotif = false;
@@ -1168,7 +1210,16 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         req_hndl->timer.restart();
     }
 
+    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     std::shared_lock<nixlLock> read_lock(data->lock);
+    if (dfw.start) {
+        dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
+        dfw.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
+        dfw.bytes = req_hndl->telemetry.totalBytes;
+        dfw.descs = req_hndl->initiatorDescs.descCount();
+        req_hndl->dfwPostStart = dfw.start;
+        req_hndl->dfwPoll = {};
+    }
     // The request was created against a specific remote registration generation: refuse to
     // post if that generation was invalidated or replaced by a re-registration meanwhile.
     if (req_hndl->remoteSection.expired()) {
@@ -1261,13 +1312,16 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         }
     }
 
+    dfw.status = req_hndl->status;
     return req_hndl->status;
 }
 
 nixl_status_t
 nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
 
+    const auto dfw_start = nixl::dfw::enabled() ? nixl::dfw::now() : 0;
     std::shared_lock<nixlLock> read_lock(data->lock);
+    if (dfw_start) req_hndl->dfwPoll.lock_ns += nixl::dfw::now() - dfw_start;
     // If the status is done, no need to recheck and no state changes.
     // Same for users incorrectly recalling this method in error/done.
     if (req_hndl->status == NIXL_IN_PROG) {
@@ -1301,6 +1355,24 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
         }
     }
 
+    if (dfw_start) {
+        auto &poll = req_hndl->dfwPoll;
+        ++poll.count;
+        poll.wall_ns += nixl::dfw::now() - dfw_start;
+        if (req_hndl->status != NIXL_IN_PROG && req_hndl->dfwPostStart) {
+            nixl::dfw::Event event{"core.complete"};
+            event.start = req_hndl->dfwPostStart;
+            event.end = nixl::dfw::now();
+            event.handle = reinterpret_cast<uint64_t>(req_hndl);
+            event.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
+            event.count = poll.count;
+            event.value = poll.wall_ns;
+            event.lock_ns = poll.lock_ns;
+            event.status = req_hndl->status;
+            nixl::dfw::emit(event);
+            req_hndl->dfwPostStart = 0;
+        }
+    }
     // If the status is error when entering this method, it was already logged
     return req_hndl->status;
 }
@@ -1333,6 +1405,8 @@ nixlAgent::queryXferBackend(const nixlXferReqH* req_hndl,
 nixl_status_t
 nixlAgent::releaseXferReq(nixlXferReqH *req_hndl) const {
 
+    nixl::dfw::Scope dfw("core.release", req_hndl, true);
+    dfw.flush_after = true;
     NIXL_SHARED_LOCK_GUARD(data->lock);
     //attempt to cancel request
     if(req_hndl->status == NIXL_IN_PROG) {
@@ -1373,11 +1447,15 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::getNotifs", nixl::trace::Kind::Metadata);
 
+    nixl::dfw::Scope dfw("core.get_notifs");
+    dfw.flush_after = true;
     notif_list_t bknd_notif_list;
     nixl_status_t   ret, bad_ret=NIXL_SUCCESS;
     backend_list_t* backend_list;
 
+    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_LOCK_GUARD(data->lock);
+    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     if (!extra_params || extra_params->backends.size() == 0) {
         backend_list = &data->notifEngines;
         if (backend_list->empty()) {
@@ -1412,6 +1490,7 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
         if (bknd_notif_list.size() == 0)
             continue;
 
+        dfw.count += bknd_notif_list.size();
         for (auto & elm: bknd_notif_list) {
             if (notif_map.count(elm.first) == 0)
                 notif_map[elm.first] = std::vector<nixl_blob_t>();
@@ -1423,6 +1502,7 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
     if (extra_params && extra_params->backends.size() > 0)
         delete backend_list;
 
+    if (dfw.start && !dfw.count) dfw.start = 0;
     // If any backend had an error, it was already logged
     return bad_ret;
 }

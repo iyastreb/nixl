@@ -34,10 +34,11 @@
 
 class nixlUcxBackendReqH : public nixlBackendReqH {
 public:
-    // Notification to be sent over the bound connection after completion of all requests.
-    // Empty if there is no pending notification.
     std::string notif;
     nixl::dfw::PollStats dfwPoll;
+    std::string notifMsg;
+    nixl::trace::TraceContext notifTraceContext;
+    bool notifPending = false;
 
 #ifdef HAVE_UCX_SGL_API
     std::optional<nixl::ucx::sglXfer> sgl;
@@ -45,6 +46,25 @@ public:
 
     explicit nixlUcxBackendReqH(nixlUcxWorker *worker) {
         setWorker(worker);
+    }
+
+    void
+    reset(nixlUcxWorker *worker) {
+        setWorker(worker);
+    }
+
+    void
+    recycle() {
+        notif.clear();
+        notifMsg.clear();
+        notifTraceContext = {};
+        notifPending = false;
+#ifdef HAVE_UCX_SGL_API
+        if (sgl) {
+            sgl->clear();
+        }
+#endif
+        setWorker(nullptr);
     }
 
     void
@@ -89,8 +109,8 @@ public:
         nixl::dfw::Scope dfw("ucx.notif_send", this);
         nixlUcxReq req = nullptr;
         const nixl_status_t status = getEp().sendAm(
-            nixl::ucx::am_cb_op_t::NOTIF_STR, std::move(notif), UCP_AM_SEND_FLAG_EAGER, &req);
-        notif.clear();
+            nixl::ucx::am_cb_op_t::NOTIF_STR, notif, UCP_AM_SEND_FLAG_EAGER, &req);
+        notifPending = false;
         return append(status, req);
     }
 

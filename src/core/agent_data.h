@@ -23,7 +23,9 @@
 #include "telemetry.h"
 #include "tracing/trace.h"
 #include "tracing/trace_context.h"
+#include "transfer_request.h"
 #include "sync.h"
+#include "common/nixl_memory_pool.h"
 
 #include <atomic>
 #include <functional>
@@ -48,11 +50,16 @@ class nixlAgentData final : public nixlMetadataContext {
         nixlLock        lock;
         std::atomic<bool> efaWarningChecked = false;
 
+        // Pool of recycled transfer request handles, to avoid a heap allocation
+        // (and the descriptor-vector allocations they carry) on every transfer.
+        nixlMemoryPool<nixlXferReqH> xferReqPool;
+
         // some handle that can be used to instantiate an object from the lib
         std::map<std::string, void*> backendLibs;
 
         // Bookkeeping from backend type and memory type to backend engine
         backend_list_t                         notifEngines;
+        notif_list_t notifScratch_;
         std::array<backend_list_t, FILE_SEG+1> memToBackend;
 
         // Bookkeeping from memory view handles to backend engines

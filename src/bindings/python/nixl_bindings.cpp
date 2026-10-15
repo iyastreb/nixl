@@ -23,124 +23,11 @@
 #include <tuple>
 #include <iostream>
 #include <span>
-#include <optional>
-#include <unordered_map>
-#include <cstring>
-#include <array>
-#include <algorithm>
-#include "common/dfw_trace.h"
 
 #include "nixl.h"
 #include "serdes/serdes.h"
 
 namespace py = pybind11;
-
-namespace {
-struct DfwGilStats {
-    uint64_t first = 0, last = 0, count = 0, sum = 0, maximum = 0;
-    int status = 0;
-    bool terminal_seen = false;
-};
-
-struct DfwBindingEvents {
-    std::array<nixl::dfw::Event, 64> events{};
-    size_t size = 0;
-    uint64_t dropped = 0;
-};
-
-DfwBindingEvents &dfwBindingEvents() {
-    thread_local DfwBindingEvents events;
-    return events;
-}
-
-void dfwDrainBindingEvents() {
-    if (!nixl::dfw::enabled()) return;
-    auto &pending = dfwBindingEvents();
-    for (size_t i = 0; i < pending.size; ++i) nixl::dfw::emit(pending.events[i]);
-    pending.size = 0;
-    if (pending.dropped) {
-        nixl::dfw::Scope event("binding.dropped");
-        event.count = pending.dropped;
-        pending.dropped = 0;
-    }
-}
-
-std::unordered_map<uint64_t, DfwGilStats> &dfwGilStats() {
-    thread_local std::unordered_map<uint64_t, DfwGilStats> stats;
-    return stats;
-}
-
-class DfwGilRelease {
-    std::optional<py::gil_scoped_release> release_;
-    nixl::dfw::Event event_{"binding.unknown_gil"};
-    bool enabled_ = nixl::dfw::enabled();
-    DfwGilRelease *previous_ = nullptr;
-    static thread_local DfwGilRelease *active_;
-
-public:
-    DfwGilRelease() {
-        if (enabled_) {
-            previous_ = active_;
-            active_ = this;
-        }
-        release_.emplace();
-        if (enabled_) dfwDrainBindingEvents();
-    }
-    ~DfwGilRelease() {
-        if (!enabled_) {
-            release_.reset();
-            return;
-        }
-        event_.start = nixl::dfw::now();
-        release_.reset();
-        event_.end = nixl::dfw::now();
-        event_.value = event_.end - event_.start;
-        event_.count = 1;
-        active_ = previous_;
-        if (std::strcmp(event_.name, "binding.check_gil") == 0) {
-            auto &stats = dfwGilStats()[event_.handle];
-            if (!stats.count) stats.first = event_.start;
-            stats.last = event_.end;
-            ++stats.count;
-            stats.sum += event_.value;
-            stats.maximum = std::max(stats.maximum, event_.value);
-            stats.status = event_.status;
-            const bool first_terminal = !stats.terminal_seen && event_.status != NIXL_IN_PROG;
-            stats.terminal_seen |= event_.status != NIXL_IN_PROG;
-            if (event_.value < 100000 && !first_terminal) return;
-        }
-        auto &pending = dfwBindingEvents();
-        if (pending.size < pending.events.size()) pending.events[pending.size++] = event_;
-        else ++pending.dropped;
-    }
-    static void label(const char *name, uint64_t handle, int status = 0) {
-        if (active_) {
-            active_->event_.name = name;
-            active_->event_.handle = handle;
-            active_->event_.status = status;
-        }
-    }
-};
-thread_local DfwGilRelease *DfwGilRelease::active_ = nullptr;
-
-void dfwFlushGilStats(uint64_t handle) {
-    if (!nixl::dfw::enabled()) return;
-    auto &stats = dfwGilStats();
-    const auto it = stats.find(handle);
-    if (it == stats.end()) return;
-    nixl::dfw::Event event{"binding.check_summary"};
-    event.start = it->second.first;
-    event.end = it->second.last;
-    event.handle = handle;
-    event.count = it->second.count;
-    event.value = it->second.sum;
-    event.lock_ns = it->second.maximum;
-    event.status = it->second.status;
-    nixl::dfw::emit(event);
-    stats.erase(it);
-}
-} // namespace
-
 
 typedef std::map<std::string, std::vector<py::bytes>> nixl_py_notifs_t;
 
@@ -885,16 +772,14 @@ PYBIND11_MODULE(_bindings, m) {
                 const auto remote_dlist = reinterpret_cast<nixlDlistH *>(remote_side);
 
                 {
-                    DfwGilRelease release;
-                    const auto ret = agent.makeXferReq(operation,
-                                                       *local_dlist,
-                                                       local_span,
-                                                       *remote_dlist,
-                                                       remote_span,
-                                                       handle,
-                                                       &extra_params);
-                    DfwGilRelease::label("binding.make_gil", (uintptr_t)handle, ret);
-                    throw_nixl_exception(ret);
+                    py::gil_scoped_release release;
+                    throw_nixl_exception(agent.makeXferReq(operation,
+                                                           *local_dlist,
+                                                           local_span,
+                                                           *remote_dlist,
+                                                           remote_span,
+                                                           handle,
+                                                           &extra_params));
                 }
 
                 return (uintptr_t)handle;
@@ -928,7 +813,6 @@ PYBIND11_MODULE(_bindings, m) {
                 nixl_status_t ret = agent.createXferReq(
                     operation, local_descs, remote_descs, remote_agent, handle, &extra_params);
 
-                DfwGilRelease::label("binding.create_gil", (uintptr_t)handle, ret);
                 throw_nixl_exception(ret);
                 return (uintptr_t)handle;
             },
@@ -938,7 +822,7 @@ PYBIND11_MODULE(_bindings, m) {
             py::arg("remote_agent"),
             py::arg("notif_msg") = std::string(""),
             py::arg("backend") = std::vector<uintptr_t>({}),
-            py::call_guard<DfwGilRelease>())
+            py::call_guard<py::gil_scoped_release>())
         .def(
             "estimateXferCost",
             [](nixlAgent &agent, uintptr_t reqh) -> std::tuple<int64_t, int64_t, int> {
@@ -962,22 +846,20 @@ PYBIND11_MODULE(_bindings, m) {
                 } else {
                     ret = agent.postXferReq((nixlXferReqH *)reqh);
                 }
-                DfwGilRelease::label("binding.post_gil", reqh, ret);
                 throw_nixl_exception(ret);
                 return ret;
             },
             py::arg("reqh"),
             py::arg("notif_msg") = std::string(""),
-            py::call_guard<DfwGilRelease>())
+            py::call_guard<py::gil_scoped_release>())
         .def(
             "getXferStatus",
             [](nixlAgent &agent, uintptr_t reqh) -> nixl_status_t {
                 nixl_status_t ret = agent.getXferStatus((nixlXferReqH *)reqh);
-                DfwGilRelease::label("binding.check_gil", reqh, ret);
                 throw_nixl_exception(ret);
                 return ret;
             },
-            py::call_guard<DfwGilRelease>())
+            py::call_guard<py::gil_scoped_release>())
         .def(
             "getXferTelemetry",
             [](nixlAgent &agent, uintptr_t reqh) -> nixl_xfer_telem_t {
@@ -995,9 +877,6 @@ PYBIND11_MODULE(_bindings, m) {
              })
         .def("releaseXferReq",
              [](nixlAgent &agent, uintptr_t reqh) -> nixl_status_t {
-                 nixl::dfw::Scope dfw("binding.release", (void *)reqh, true);
-                 dfwDrainBindingEvents();
-                 dfwFlushGilStats(reqh);
                  nixl_status_t ret = agent.releaseXferReq((nixlXferReqH *)reqh);
                  throw_nixl_exception(ret);
                  return ret;

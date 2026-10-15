@@ -30,6 +30,7 @@
 #include "nixl_md_manager.h"
 #include "plugin_manager.h"
 #include "common/configuration.h"
+#include "common/dfw_api_timing.h"
 #include "common/nixl_log.h"
 #include "common/operators.h"
 #include "common/hw_info.h"
@@ -454,8 +455,6 @@ nixlAgent::queryMem(const nixl_reg_dlist_t &descs,
 nixl_status_t
 nixlAgent::registerMem(const nixl_reg_dlist_t &descs,
                        const nixl_opt_args_t* extra_params) {
-    nixl::dfw::Scope dfw("core.register");
-    dfw.descs = descs.descCount();
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::registerMem", nixl::trace::Kind::MemoryW);
     NIXL_TRACE_ATTR(trace_span, "mem_type", static_cast<std::int64_t>(descs.getType()));
@@ -525,8 +524,6 @@ nixlAgent::registerMem(const nixl_reg_dlist_t &descs,
 nixl_status_t
 nixlAgent::deregisterMem(const nixl_reg_dlist_t &descs,
                          const nixl_opt_args_t* extra_params) {
-    nixl::dfw::Scope dfw("core.deregister");
-    dfw.descs = descs.descCount();
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::deregisterMem", nixl::trace::Kind::Generic);
     NIXL_TRACE_ATTR(trace_span, "mem_type", static_cast<std::int64_t>(descs.getType()));
@@ -534,9 +531,7 @@ nixlAgent::deregisterMem(const nixl_reg_dlist_t &descs,
     backend_set_t backend_set;
     nixl_status_t bad_ret = NIXL_SUCCESS;
 
-    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_LOCK_GUARD(data->lock);
-    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     if (!extra_params || extra_params->backends.size() == 0) {
         backend_set_t *avail_backends = data->localSection_.queryBackends(descs.getType());
         if (!avail_backends || avail_backends->empty()) {
@@ -643,16 +638,11 @@ nixlAgentData::prepXferDlist(const std::string &agent_name,
                              nixlDlistH *&dlist_hndl,
                              const nixl_opt_args_t *extra_params) {
 
-    nixl::dfw::Scope dfw("core.prep_dlist");
-    dfw.descs = descs.descCount();
-
     // Using a set as order is not important to revert the operation
     backend_set_t *backend_set;
     const bool init_side = (agent_name == NIXL_INIT_AGENT);
 
-    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_SHARED_LOCK_GUARD(lock);
-    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     // When central KV is supported, still it should return error,
     // just we can add a call to fetchRemoteMD for next time
     const auto rem_sec_it = remoteSections_.find(agent_name);
@@ -777,12 +767,11 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
                        std::span<const int> remote_indices,
                        nixlXferReqH *&req_hndl,
                        const nixl_opt_args_t *extra_params) const {
+    nixl::dfw_api::Scope api_timing("make", local_indices.size());
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::makeXferReq", nixl::trace::Kind::Generic);
     NIXL_TRACE_ATTR(trace_span, "desc_count", static_cast<std::int64_t>(local_indices.size()));
 
-    nixl::dfw::Scope dfw("core.make", nullptr, true);
-    dfw.descs = local_indices.size();
     nixl_opt_b_args_t  opt_args;
     nixl_status_t      ret;
     int                desc_count = (int) local_indices.size();
@@ -793,14 +782,14 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     if ((!local_side.remoteAgent.empty()) || remote_side.remoteAgent.empty()) {
         NIXL_ERROR_FUNC << "invalid sides (local must be local, remote must be remote)";
         data->addErrorTelemetry(NIXL_ERR_INVALID_PARAM);
-        return NIXL_ERR_INVALID_PARAM;
+        return api_timing.result(NIXL_ERR_INVALID_PARAM);
     }
 
     if ((desc_count == 0) || (remote_indices.size() == 0) ||
         (desc_count != (int)remote_indices.size())) {
         NIXL_ERROR_FUNC << "different number of indices for local (" << desc_count << "), remote ("
                         << remote_indices.size() << ")";
-        return NIXL_ERR_INVALID_PARAM;
+        return api_timing.result(NIXL_ERR_INVALID_PARAM);
     }
 
     if (extra_params && extra_params->backends.size() > 0) {
@@ -827,7 +816,7 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     if (!backend) {
         NIXL_ERROR_FUNC << "could not find a common backend in the specified or "
                            "available list of backends for the prepped Dlists";
-        return NIXL_ERR_INVALID_PARAM;
+        return api_timing.result(NIXL_ERR_INVALID_PARAM);
     }
 
     if (extra_params) {
@@ -844,12 +833,10 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     if ((opt_args.hasNotif) && (!backend->supportsNotif())) {
         NIXL_ERROR_FUNC << "the selected backend '" << backend->getType()
                         << "' does not support notifications";
-        return NIXL_ERR_BACKEND;
+        return api_timing.result(NIXL_ERR_BACKEND);
     }
 
-    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_SHARED_LOCK_GUARD(data->lock);
-    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     // The prepped remote dlist snapshot is only valid for the remote registration generation
     // it was prepared from: reject if that generation was invalidated or replaced since.
     const auto remote_sec_ref = remote_side.remoteSectionRef.lock();
@@ -858,7 +845,7 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
                         << "' was invalidated or re-registered after prepped xfer request "
                            "creation; prepped descriptor lists must be re-created";
         data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
-        return NIXL_ERR_NOT_FOUND;
+        return api_timing.result(NIXL_ERR_NOT_FOUND);
     }
 
     const nixl_meta_stride_dlist_t &local_descs = *local_side.descs.at(backend);
@@ -866,7 +853,7 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
 
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
-    nixl::dfw::Scope dfw_allocate("core.allocate");
+    api_timing.mark(api_timing.alloc_start_ns);
     auto handle = std::make_unique<nixlXferReqH>(remote_side.remoteAgent,
                                                  operation,
                                                  local_descs.getType(),
@@ -874,14 +861,10 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
                                                  desc_count,
                                                  remote_side.remoteSectionRef,
                                                  nixl::trace::TraceContext{data->tracer_.get()});
-    if (dfw_allocate.start) {
-        handle->dfwPoll = {};
-        handle->dfwPostStart = 0;
-    }
-    dfw_allocate.handle = reinterpret_cast<uint64_t>(handle.get());
-    dfw_allocate.finish();
-    nixl::dfw::Scope dfw_descs("core.descriptors", handle.get());
+    api_timing.mark(api_timing.alloc_end_ns);
+    api_timing.handle = reinterpret_cast<uint64_t>(handle.get());
 
+    api_timing.mark(api_timing.descs_start_ns);
     size_t total_bytes = 0;
     const bool skip_desc_merge = extra_params && extra_params->skipDescMerge;
     const size_t local_size = local_descs.flatSize();
@@ -901,12 +884,12 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
         if (local_idx >= local_size) [[unlikely]] {
             NIXL_ERROR_FUNC << "local index out of range at index " << i << " with value "
                             << local_indices[i];
-            return NIXL_ERR_INVALID_PARAM;
+            return api_timing.result(NIXL_ERR_INVALID_PARAM);
         }
         if (remote_idx >= remote_size) [[unlikely]] {
             NIXL_ERROR_FUNC << "remote index out of range at index " << i << " with value "
                             << remote_indices[i];
-            return NIXL_ERR_INVALID_PARAM;
+            return api_timing.result(NIXL_ERR_INVALID_PARAM);
         }
 
         // Keep by value to avoid reloads and keep in registers
@@ -916,7 +899,7 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
         if (local_stride.len != remote_stride.len) [[unlikely]] {
             NIXL_ERROR_FUNC << "length mismatch at index " << i << " with local index "
                             << local_indices[i] << " and remote index " << remote_indices[i];
-            return NIXL_ERR_INVALID_PARAM;
+            return api_timing.result(NIXL_ERR_INVALID_PARAM);
         }
 
         seq_count = 1;
@@ -942,6 +925,10 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
         total_bytes += local_desc.len;
     }
 
+    api_timing.mark(api_timing.descs_end_ns);
+    api_timing.output_descs = handle->initiatorDescs.descCount();
+    api_timing.bytes = total_bytes;
+
     NIXL_DEBUG << "makeXfer bytes: " << total_bytes
                << ", descs: " << handle->initiatorDescs.descCount() << ", indices: " << desc_count;
 
@@ -955,30 +942,25 @@ nixlAgent::makeXferReq(nixl_xfer_op_t operation,
     handle->telemetry.totalBytes = total_bytes;
     handle->telemetry.descCount = handle->initiatorDescs.descCount();
 
-    dfw_descs.descs = handle->initiatorDescs.descCount();
-    dfw_descs.bytes = total_bytes;
-    dfw_descs.finish();
     opt_args.traceContext = &handle->traceContext();
+    api_timing.mark(api_timing.backend_start_ns);
     ret = handle->engine->prepXfer(handle->backendOp,
                                    handle->initiatorDescs,
                                    handle->targetDescs,
                                    handle->remoteAgent,
                                    handle->backendHandle,
                                    &opt_args);
+    api_timing.mark(api_timing.backend_end_ns);
     if (ret != NIXL_SUCCESS) {
         NIXL_ERROR_FUNC << "backend '" << backend->getType()
                         << "' failed to prepare the transfer request with status " << ret;
         data->addErrorTelemetry(ret);
-        return ret;
+        return api_timing.result(ret);
     }
 
     data->warnIfTraceContextUnsupported(*backend, handle->traceContext());
     req_hndl = handle.release();
-    dfw.handle = reinterpret_cast<uint64_t>(req_hndl);
-    dfw.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
-    dfw.bytes = total_bytes;
-    dfw.count = req_hndl->initiatorDescs.descCount();
-    return NIXL_SUCCESS;
+    return api_timing.result(NIXL_SUCCESS);
 }
 
 nixl_status_t
@@ -988,13 +970,12 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                          const std::string &remote_agent,
                          nixlXferReqH* &req_hndl,
                          const nixl_opt_args_t* extra_params) const {
+    nixl::dfw_api::Scope api_timing("create", local_descs.descCount());
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::createXferReq", nixl::trace::Kind::Generic);
     NIXL_TRACE_ATTR(trace_span, "remote_agent", std::string_view{remote_agent});
     NIXL_TRACE_ATTR(trace_span, "desc_count", static_cast<std::int64_t>(local_descs.descCount()));
 
-    nixl::dfw::Scope dfw("core.create", nullptr, true);
-    dfw.descs = local_descs.descCount();
     nixl_status_t ret1, ret2;
     nixl_opt_b_args_t opt_args;
     backend_set_t backend_set;
@@ -1005,26 +986,24 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     if (local_descs.descCount() != remote_descs.descCount()) {
         NIXL_ERROR_FUNC << "different descriptor list sizes (local=" << local_descs.descCount()
                         << ", remote=" << remote_descs.descCount() << ")";
-        return NIXL_ERR_INVALID_PARAM;
+        return api_timing.result(NIXL_ERR_INVALID_PARAM);
     }
 
     size_t total_bytes = 0;
     for (int i = 0; i < local_descs.descCount(); ++i) {
         if (local_descs[i].len != remote_descs[i].len) [[unlikely]] {
             NIXL_ERROR_FUNC << "length mismatch at index " << i;
-            return NIXL_ERR_INVALID_PARAM;
+            return api_timing.result(NIXL_ERR_INVALID_PARAM);
         }
         total_bytes += local_descs[i].len;
     }
 
-    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_SHARED_LOCK_GUARD(data->lock);
-    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     const auto rem_sec_it = data->remoteSections_.find(remote_agent);
     if (data->remoteSections_.end() == rem_sec_it) {
         NIXL_ERROR_FUNC << "metadata for remote agent '" << remote_agent << "' not found";
         data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
-        return NIXL_ERR_NOT_FOUND;
+        return api_timing.result(NIXL_ERR_NOT_FOUND);
     }
 
     if (!extra_params || extra_params->backends.size() == 0) {
@@ -1035,7 +1014,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         if (!local_set || !remote_set) {
             NIXL_ERROR_FUNC << "no backends found for local or remote for their "
                                "corresponding memory type";
-            return NIXL_ERR_NOT_FOUND;
+            return api_timing.result(NIXL_ERR_NOT_FOUND);
         }
 
         for (auto & elm : *local_set)
@@ -1045,7 +1024,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
 
         if (backend_set.empty()) {
             NIXL_ERROR_FUNC << "no potential backend found to be able to do the transfer";
-            return NIXL_ERR_NOT_FOUND;
+            return api_timing.result(NIXL_ERR_NOT_FOUND);
         }
     } else {
         for (auto & elm : extra_params->backends)
@@ -1056,7 +1035,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     // TODO: merge descriptors back to back in memory (like makeXferReq).
     // TODO [Perf]: Avoid heap allocation on the datapath, maybe use a mem pool
 
-    nixl::dfw::Scope dfw_allocate("core.allocate");
+    api_timing.mark(api_timing.alloc_start_ns);
     auto handle = std::make_unique<nixlXferReqH>(remote_agent,
                                                  operation,
                                                  local_descs.getType(),
@@ -1064,16 +1043,12 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
                                                  local_descs.descCount(),
                                                  rem_sec_it->second,
                                                  nixl::trace::TraceContext{data->tracer_.get()});
-    if (dfw_allocate.start) {
-        handle->dfwPoll = {};
-        handle->dfwPostStart = 0;
-    }
-    dfw_allocate.handle = reinterpret_cast<uint64_t>(handle.get());
-    dfw_allocate.finish();
-    nixl::dfw::Scope dfw_descs("core.descriptors", handle.get());
+    api_timing.mark(api_timing.alloc_end_ns);
+    api_timing.handle = reinterpret_cast<uint64_t>(handle.get());
 
     // Currently we loop through and find first local match. Can use a
     // preference list or more exhaustive search.
+    api_timing.mark(api_timing.descs_start_ns);
     for (auto &backend : backend_set) {
         // If populate fails, it clears the resp before return
         ret1 = data->localSection_.populate(local_descs, backend, handle->initiatorDescs);
@@ -1086,11 +1061,15 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         }
     }
 
+    api_timing.mark(api_timing.descs_end_ns);
+    api_timing.output_descs = handle->initiatorDescs.descCount();
+    api_timing.bytes = total_bytes;
+
     if (!handle->engine) {
         NIXL_ERROR_FUNC << "no specified or potential backend had the required "
                            "registrations to be able to do the transfer";
         data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
-        return NIXL_ERR_NOT_FOUND;
+        return api_timing.result(NIXL_ERR_NOT_FOUND);
     }
 
     if (extra_params) {
@@ -1110,7 +1089,7 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
         NIXL_ERROR_FUNC << "the selected backend '" << handle->engine->getType()
                         << "' does not support notifications";
         data->addErrorTelemetry(NIXL_ERR_BACKEND);
-        return NIXL_ERR_BACKEND;
+        return api_timing.result(NIXL_ERR_BACKEND);
     }
 
     handle->notifMsg = opt_args.notifMsg;
@@ -1122,30 +1101,25 @@ nixlAgent::createXferReq(const nixl_xfer_op_t &operation,
     handle->telemetry.totalBytes = total_bytes;
     handle->telemetry.descCount = handle->initiatorDescs.descCount();
 
-    dfw_descs.descs = handle->initiatorDescs.descCount();
-    dfw_descs.bytes = total_bytes;
-    dfw_descs.finish();
     opt_args.traceContext = &handle->traceContext();
+    api_timing.mark(api_timing.backend_start_ns);
     ret1 = handle->engine->prepXfer(handle->backendOp,
                                     handle->initiatorDescs,
                                     handle->targetDescs,
                                     handle->remoteAgent,
                                     handle->backendHandle,
                                     &opt_args);
+    api_timing.mark(api_timing.backend_end_ns);
     if (ret1 != NIXL_SUCCESS) {
         NIXL_ERROR_FUNC << "backend '" << handle->engine->getType()
                         << "' failed to prepare the transfer request with status " << ret1;
         data->addErrorTelemetry(ret1);
-        return ret1;
+        return api_timing.result(ret1);
     }
 
     data->warnIfTraceContextUnsupported(*handle->engine, handle->traceContext());
     req_hndl = handle.release();
-    dfw.handle = reinterpret_cast<uint64_t>(req_hndl);
-    dfw.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
-    dfw.bytes = total_bytes;
-    dfw.count = req_hndl->initiatorDescs.descCount();
-    return NIXL_SUCCESS;
+    return api_timing.result(NIXL_SUCCESS);
 }
 
 nixl_status_t
@@ -1192,7 +1166,7 @@ nixlAgent::estimateXferCost(const nixlXferReqH *req_hndl,
 nixl_status_t
 nixlAgent::postXferReq(nixlXferReqH *req_hndl,
                        const nixl_opt_args_t* extra_params) const {
-    nixl::dfw::Scope dfw("core.post", req_hndl, true);
+    nixl::dfw_api::Scope api_timing("post", 0);
     nixl_opt_b_args_t opt_args;
 
     opt_args.hasNotif = false;
@@ -1200,8 +1174,13 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
     if (!req_hndl) {
         NIXL_ERROR_FUNC << "transfer request handle is null";
         data->addErrorTelemetry(NIXL_ERR_INVALID_PARAM);
-        return NIXL_ERR_INVALID_PARAM;
+        return api_timing.result(NIXL_ERR_INVALID_PARAM);
     }
+
+    api_timing.handle = reinterpret_cast<uint64_t>(req_hndl);
+    api_timing.input_descs = req_hndl->initiatorDescs.descCount();
+    api_timing.output_descs = req_hndl->targetDescs.descCount();
+    api_timing.bytes = req_hndl->telemetry.totalBytes;
 
     NIXL_TRACE_CORRELATION_SCOPE(data->tracer_.get(), req_hndl->traceCorrelationId64());
     NIXL_TRACE_SCOPE(trace_span,
@@ -1218,16 +1197,7 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         req_hndl->timer.restart();
     }
 
-    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     std::shared_lock<nixlLock> read_lock(data->lock);
-    if (dfw.start) {
-        dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
-        dfw.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
-        dfw.bytes = req_hndl->telemetry.totalBytes;
-        dfw.descs = req_hndl->initiatorDescs.descCount();
-        req_hndl->dfwPostStart = dfw.start;
-        req_hndl->dfwPoll = {};
-    }
     // The request was created against a specific remote registration generation: refuse to
     // post if that generation was invalidated or replaced by a re-registration meanwhile.
     if (req_hndl->remoteSection.expired()) {
@@ -1235,7 +1205,7 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
                         << "' was invalidated or re-registered after transfer request creation; "
                            "not posting stale handle";
         data->addErrorTelemetry(NIXL_ERR_NOT_FOUND);
-        return NIXL_ERR_NOT_FOUND;
+        return api_timing.result(NIXL_ERR_NOT_FOUND);
     }
 
     // We can't repost while a request is in progress
@@ -1244,13 +1214,13 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
                                      req_hndl->backendHandle);
         if (req_hndl->status == NIXL_IN_PROG) {
             NIXL_ERROR_FUNC << "transfer request is still in progress and cannot be reposted";
-            return NIXL_ERR_REPOST_ACTIVE;
+            return api_timing.result(NIXL_ERR_REPOST_ACTIVE);
         }
 
         if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {
             NIXL_ERROR_FUNC << "remote agent '" << req_hndl->remoteAgent
                             << "' was disconnected after transfer request creation";
-            return NIXL_ERR_REMOTE_DISCONNECT;
+            return api_timing.result(NIXL_ERR_REMOTE_DISCONNECT);
         }
     }
 
@@ -1283,24 +1253,26 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         NIXL_ERROR_FUNC << "the selected backend '" << req_hndl->engine->getType()
                         << "' does not support notifications";
         data->addErrorTelemetry(NIXL_ERR_BACKEND);
-        return NIXL_ERR_BACKEND;
+        return api_timing.result(NIXL_ERR_BACKEND);
     }
 
     opt_args.traceContext = &req_hndl->traceContext();
 
     // If status is not NIXL_IN_PROG we can repost,
+    api_timing.mark(api_timing.backend_start_ns);
     req_hndl->status = req_hndl->engine->postXfer(req_hndl->backendOp,
                                                   req_hndl->initiatorDescs,
                                                   req_hndl->targetDescs,
                                                   req_hndl->remoteAgent,
                                                   req_hndl->backendHandle,
                                                   &opt_args);
+    api_timing.mark(api_timing.backend_end_ns);
 
     if (req_hndl->status < 0) {
         if (req_hndl->status == NIXL_ERR_REMOTE_DISCONNECT) {
             NIXL_ERROR_FUNC << "remote agent '" << req_hndl->remoteAgent
                             << "' was disconnected after transfer request creation";
-            return NIXL_ERR_REMOTE_DISCONNECT;
+            return api_timing.result(NIXL_ERR_REMOTE_DISCONNECT);
         } else {
             NIXL_ERROR_FUNC << "backend '" << req_hndl->engine->getType()
                             << "' failed to post the transfer request with status "
@@ -1320,16 +1292,13 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
         }
     }
 
-    dfw.status = req_hndl->status;
-    return req_hndl->status;
+    return api_timing.result(req_hndl->status);
 }
 
 nixl_status_t
 nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
 
-    const auto dfw_start = nixl::dfw::enabled() ? nixl::dfw::now() : 0;
     std::shared_lock<nixlLock> read_lock(data->lock);
-    if (dfw_start) req_hndl->dfwPoll.lock_ns += nixl::dfw::now() - dfw_start;
     // If the status is done, no need to recheck and no state changes.
     // Same for users incorrectly recalling this method in error/done.
     if (req_hndl->status == NIXL_IN_PROG) {
@@ -1363,24 +1332,6 @@ nixlAgent::getXferStatus (nixlXferReqH *req_hndl) const {
         }
     }
 
-    if (dfw_start) {
-        auto &poll = req_hndl->dfwPoll;
-        ++poll.count;
-        poll.wall_ns += nixl::dfw::now() - dfw_start;
-        if (req_hndl->status != NIXL_IN_PROG && req_hndl->dfwPostStart) {
-            nixl::dfw::Event event{"core.complete"};
-            event.start = req_hndl->dfwPostStart;
-            event.end = nixl::dfw::now();
-            event.handle = reinterpret_cast<uint64_t>(req_hndl);
-            event.peer = reinterpret_cast<uint64_t>(req_hndl->backendHandle);
-            event.count = poll.count;
-            event.value = poll.wall_ns;
-            event.lock_ns = poll.lock_ns;
-            event.status = req_hndl->status;
-            nixl::dfw::emit(event);
-            req_hndl->dfwPostStart = 0;
-        }
-    }
     // If the status is error when entering this method, it was already logged
     return req_hndl->status;
 }
@@ -1413,8 +1364,6 @@ nixlAgent::queryXferBackend(const nixlXferReqH* req_hndl,
 nixl_status_t
 nixlAgent::releaseXferReq(nixlXferReqH *req_hndl) const {
 
-    nixl::dfw::Scope dfw("core.release", req_hndl, true);
-    dfw.flush_after = true;
     NIXL_SHARED_LOCK_GUARD(data->lock);
     //attempt to cancel request
     if(req_hndl->status == NIXL_IN_PROG) {
@@ -1455,15 +1404,11 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
     NIXL_TRACE_SCOPE(
         trace_span, data->tracer_.get(), "nixl::getNotifs", nixl::trace::Kind::Metadata);
 
-    nixl::dfw::Scope dfw("core.get_notifs");
-    dfw.flush_after = true;
     notif_list_t bknd_notif_list;
     nixl_status_t   ret, bad_ret=NIXL_SUCCESS;
     backend_list_t* backend_list;
 
-    const auto dfw_lock_start = dfw.start ? nixl::dfw::now() : 0;
     NIXL_LOCK_GUARD(data->lock);
-    if (dfw.start) dfw.lock_ns = nixl::dfw::now() - dfw_lock_start;
     if (!extra_params || extra_params->backends.size() == 0) {
         backend_list = &data->notifEngines;
         if (backend_list->empty()) {
@@ -1498,7 +1443,6 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
         if (bknd_notif_list.size() == 0)
             continue;
 
-        dfw.count += bknd_notif_list.size();
         for (auto & elm: bknd_notif_list) {
             if (notif_map.count(elm.first) == 0)
                 notif_map[elm.first] = std::vector<nixl_blob_t>();
@@ -1510,7 +1454,6 @@ nixlAgent::getNotifs(nixl_notifs_t &notif_map,
     if (extra_params && extra_params->backends.size() > 0)
         delete backend_list;
 
-    if (dfw.start && !dfw.count) dfw.start = 0;
     // If any backend had an error, it was already logged
     return bad_ret;
 }

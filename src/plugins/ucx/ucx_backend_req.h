@@ -26,29 +26,16 @@
 
 #include "backend/backend_engine.h"
 #include "common/nixl_log.h"
-#include "common/dfw_trace.h"
 
 #include "ucx_backend.h"
 #include "ucx_sgl.h"
 #include "ucx_utils.h"
-
-struct nixlUcxFlushStamp : std::atomic<uint64_t> {
-    nixlUcxFlushStamp() noexcept : std::atomic<uint64_t>(0) {}
-    nixlUcxFlushStamp(nixlUcxFlushStamp &&other) noexcept
-        : std::atomic<uint64_t>(other.load(std::memory_order_relaxed)) {}
-    nixlUcxFlushStamp &operator=(nixlUcxFlushStamp &&other) noexcept {
-        store(other.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        return *this;
-    }
-};
 
 class nixlUcxBackendReqH : public nixlBackendReqH {
 public:
     // Notification to be sent over the bound connection after completion of all requests.
     // Empty if there is no pending notification.
     std::string notif;
-    nixl::dfw::PollStats dfwPoll;
-    nixlUcxFlushStamp dfwFlushDone;
 
 #ifdef HAVE_UCX_SGL_API
     std::optional<nixl::ucx::sglXfer> sgl;
@@ -89,17 +76,13 @@ public:
      */
     [[nodiscard]] nixl_status_t
     flush() {
-        nixl::dfw::Scope dfw("ucx.flush", this);
         nixlUcxReq req = nullptr;
-        if (dfw.start) dfwFlushDone.store(0, std::memory_order_relaxed);
-        const nixl_status_t status = ep_->flushEp(req, dfw.start ? &dfwFlushDone : nullptr);
+        const nixl_status_t status = ep_->flushEp(req);
         return append(status, req);
     }
 
     [[nodiscard]] nixl_status_t
     sendNotif() {
-        nixl::dfw::Scope dfw("ucx.notif_send", this);
-        if (dfw.start) dfw.completed_ns = dfwFlushDone.load(std::memory_order_acquire);
         nixlUcxReq req = nullptr;
         const nixl_status_t status = getEp().sendAm(
             nixl::ucx::am_cb_op_t::NOTIF_STR, std::move(notif), UCP_AM_SEND_FLAG_EAGER, &req);
@@ -139,12 +122,7 @@ public:
             return NIXL_SUCCESS;
         }
 
-        const auto dfw_start = nixl::dfw::enabled() ? nixl::dfw::now() : 0;
         worker_->progressLoop();
-        if (dfw_start) {
-            ++dfwPoll.count;
-            dfwPoll.progress_ns += nixl::dfw::now() - dfw_start;
-        }
 
         /* If last request is incomplete, return NIXL_IN_PROG early without
          * checking other requests */

@@ -24,7 +24,6 @@
 #include "serdes/serdes.h"
 #include "common/backend.h"
 #include "common/configuration.h"
-#include "common/dfw_trace.h"
 #include "common/nixl_log.h"
 #include "tracing/backend_trace.h"
 
@@ -364,8 +363,6 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
                                        nixlBackendReqH* &handle,
                                        const nixl_opt_b_args_t* opt_args) const
 {
-    nixl::dfw::Scope dfw("ucx.prep");
-    dfw.descs = local.descCount();
     if (local.descCount() == 0 || remote.descCount() == 0) {
         NIXL_ERROR << "Local or remote descriptor list is empty";
         return NIXL_ERR_INVALID_PARAM;
@@ -374,13 +371,6 @@ nixl_status_t nixlUcxEngine::prepXfer (const nixl_xfer_op_t &operation,
     const size_t worker_id = getSharedWorkerId(opt_args);
     /* TODO: try to get from a pool first */
     handle = new nixlUcxBackendReqH(getSharedWorker(worker_id).get());
-    if (dfw.start) {
-        const auto traced_handle = static_cast<nixlUcxBackendReqH *>(handle);
-        traced_handle->dfwPoll = {};
-        traced_handle->dfwFlushDone.store(0, std::memory_order_relaxed);
-    }
-    dfw.handle = reinterpret_cast<uint64_t>(handle);
-    dfw.value = worker_id;
 
 #ifdef HAVE_UCX_SGL_API
     if (sglEnabled_ && operation == NIXL_WRITE) {
@@ -453,8 +443,6 @@ nixl_status_t
 nixlUcxEngine::prepXferSgl(const nixl_meta_dlist_t &local,
                            const nixl_meta_dlist_t &remote,
                            nixlBackendReqH *handle) const {
-    nixl::dfw::Scope dfw("ucx.sgl_prep", handle);
-    dfw.descs = local.descCount();
     NIXL_ASSERT(local.descCount() == remote.descCount());
 
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
@@ -464,7 +452,6 @@ nixlUcxEngine::prepXferSgl(const nixl_meta_dlist_t &local,
 
 nixl_status_t
 nixlUcxEngine::sendXferSgl(nixlBackendReqH *handle) const {
-    nixl::dfw::Scope dfw("ucx.sgl_post_flush", handle);
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
     NIXL_ASSERT(int_handle->sgl);
     auto &sgl = *int_handle->sgl;
@@ -568,8 +555,6 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
                         const std::string &remote_agent,
                         nixlBackendReqH *&handle,
                         const nixl_opt_b_args_t *opt_args) const {
-    nixl::dfw::Scope dfw("ucx.post", handle);
-    dfw.descs = local.descCount();
     const size_t lcnt = local.descCount();
     const size_t rcnt = remote.descCount();
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
@@ -581,7 +566,6 @@ nixlUcxEngine::postXfer(const nixl_xfer_op_t &operation,
         return NIXL_ERR_INVALID_PARAM;
     }
 
-    if (dfw.start) int_handle->dfwPoll = {};
     // TODO: assert that handle is empty/completed, as we can't post request before completion
 
     ret = sendXferRange(operation, local, remote, remote_agent, handle, 0, lcnt);
@@ -630,13 +614,6 @@ nixl_status_t nixlUcxEngine::checkXfer (nixlBackendReqH* handle) const
 nixl_status_t nixlUcxEngine::releaseReqH(nixlBackendReqH* handle) const
 {
     const auto int_handle = static_cast<nixlUcxBackendReqH *>(handle);
-    nixl::dfw::Scope dfw("ucx.release", handle);
-    if (dfw.start) {
-        dfw.completed_ns = int_handle->dfwFlushDone.load(std::memory_order_acquire);
-        dfw.count = int_handle->dfwPoll.count;
-        dfw.value = int_handle->dfwPoll.progress_ns;
-        dfw.bytes = 0;
-    }
     int_handle->release();
 
     /* TODO: return to a pool instead. */
@@ -705,7 +682,6 @@ nixl::ucx::deserializeNotif(const std::string &buffer, bool with_trace_context) 
 std::string
 nixlUcxEngine::buildNotif(const std::string &msg,
                           const nixl::trace::TraceContext *trace_context) const {
-    nixl::dfw::Scope dfw("ucx.notif_serialize");
     // TODO: replace with mpool for performance
     return nixl::ucx::serializeNotif(localAgent, msg, trace_context);
 }
@@ -737,10 +713,7 @@ nixlUcxEngine::notifAmCb(void *arg, const void *header,
                          size_t length,
                          const ucp_am_recv_param_t *param)
 {
-    nixl::dfw::Scope dfw("ucx.notif_receive", arg);
-    dfw.flush_after = true;
     std::string ser_str( (char*) data, length);
-    dfw.bytes = length;
     nixlUcxEngine* engine = (nixlUcxEngine*) arg;
 
     // send_am should be forcing EAGER protocol
